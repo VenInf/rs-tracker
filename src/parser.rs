@@ -1,13 +1,10 @@
-use display_tree::{DisplayTree, Style};
 use winnow::error::AddContext;
 use winnow::token as token;
 use winnow::ascii as ascii;
 use winnow::combinator as comb;
 use winnow::{self, Parser};
 use winnow::error::{ContextError, Result, StrContext};
-use winnow::stream::Stream;
 use std::collections::BTreeMap;
-use std::str as str;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,7 +24,7 @@ impl<'a> AST<'a> {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     write!(f, "\"{}\"", s)
                 } else {
-                    write!(f, "HASH")
+                    write!(f, "<HASHES>")
                 }
             }
             AST::Integer(i) => write!(f, "{}", i),
@@ -88,9 +85,6 @@ pub fn parse_bytestring<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, Conte
     token::literal(':').parse_next(input_slice)?;    
     let n_tokens = token::take(num).parse_next(input_slice)?;
 
-    // let checkpoint = input_slice.checkpoint();
-    // let byte_string = str::from_utf8(n_tokens).map_err(|_| ContextError::default().add_context(input_slice, &checkpoint, StrContext::Label("Failed to parse Utf8 bytestring")))?;
-    
     Ok(AST::ByteString(n_tokens))
 }
 
@@ -148,15 +142,9 @@ pub fn parse_dictionary<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, Conte
 
 pub fn parse_bencode<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
     comb::alt((
-        parse_integer,
-        parse_bytestring,
-        parse_list,
-        parse_dictionary,
+        parse_integer.context(StrContext::Label("Parsing an Integer")),
+        parse_bytestring.context(StrContext::Label("Parsing a ByteString")),
+        parse_list.context(StrContext::Label("Parsing a List")),
+        parse_dictionary.context(StrContext::Label("Parsing a Dictionary")),
     )).parse_next(input_slice)
-}
-
-pub fn parse_literal_a<'a>(input_slice: &mut &'a [u8]) -> Result<&'a [u8], ContextError> {
-        token::literal(b'a')
-                .context(StrContext::Label("Expected literal `a` at the start of the packet"))
-                .parse_next(input_slice)
 }
