@@ -5,6 +5,7 @@ use std::{error::Error, fmt};
 pub struct TorrentTorrentFile<'a> {
     pub announce: &'a str,
     pub info: TorrentInfo<'a>,
+    // pub infoHash: todo!("Do the hash"),
     pub announce_list: Option<Vec<Vec<&'a str>>>,
     pub comment:  Option<&'a str>,
     pub created_by:  Option<&'a str>,

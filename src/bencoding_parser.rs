@@ -72,6 +72,31 @@ impl<'a> fmt::Display for AST<'a> {
 }
 
 impl<'a> AST<'a> {
+    pub fn construct_bencode(&'a self) -> Vec<u8> {
+        match self {
+            AST::ByteString(bs) => {
+                let len_bytes: Vec<u8> = bs.len().to_string().into_bytes();
+                [len_bytes, b":".to_vec(), bs.to_vec()].concat()
+            },
+            AST::Integer(i) => {
+                let i_bytes: Vec<u8> = i.to_string().into_bytes();
+                [b"i".to_vec(), i_bytes, b"e".to_vec()].concat()
+            } ,
+            AST::List(l) => {
+                let list_bytes: Vec<u8> = l.iter().flat_map(| node | node.construct_bencode()).collect();
+                [b"l".to_vec(), list_bytes, b"e".to_vec()].concat()
+            },
+            AST::Dictionary(d) => {
+                let mut dict_bytes = Vec::new();
+                for (key, value) in d {
+                    dict_bytes.extend(key.construct_bencode());
+                    dict_bytes.extend(value.construct_bencode());
+                }
+                [b"d".to_vec(), dict_bytes, b"e".to_vec()].concat()
+            },
+        }
+    }
+
     pub fn get_from_dict(&'a self, key: &'a [u8]) -> Option<&'a AST<'a>> {
         match self {
             AST::Dictionary(map) => map.get(&AST::ByteString(key)),
@@ -113,6 +138,19 @@ impl<'a> AST<'a> {
 }
 
 
+// Parsing Bencoded u8 slice to the AST
+pub fn parse_bencode<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
+    comb::alt((
+        parse_integer.context(StrContext::Label("Parsing an Integer")),
+        parse_bytestring.context(StrContext::Label("Parsing a ByteString")),
+        parse_list.context(StrContext::Label("Parsing a List")),
+        parse_dictionary.context(StrContext::Label("Parsing a Dictionary")),
+    )).parse_next(input_slice)
+}
+
+
+
+
 // ByteStrings
 
 // Byte strings are encoded as follows: <string length encoded in base ten ASCII>:<string data>
@@ -121,7 +159,7 @@ impl<'a> AST<'a> {
 //     Example: 4:spam represents the string "spam"
 //     Example: 0: represents the empty string ""
 
-pub fn parse_bytestring<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
+fn parse_bytestring<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
     let num: u64 = ascii::dec_uint(input_slice)?;
     token::literal(':').parse_next(input_slice)?;    
     let n_tokens = token::take(num).parse_next(input_slice)?;
@@ -141,7 +179,7 @@ pub fn parse_bytestring<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, Conte
 
 //     NOTE: The maximum number of bit of this integer is unspecified, but to handle it as a signed 64bit integer is mandatory to handle "large files" aka .torrent for more that 4Gbyte.
 
-pub fn parse_integer<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
+fn parse_integer<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
     token::literal('i').parse_next(input_slice)?;    
     let int: i64 = ascii::dec_int(input_slice)?;
     token::literal('e').parse_next(input_slice)?;    
@@ -157,7 +195,7 @@ pub fn parse_integer<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextE
 //     Example: l4:spam4:eggse represents the list of two strings: [ "spam", "eggs" ]
 //     Example: le represents an empty list: []
 
-pub fn parse_list<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
+fn parse_list<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
     token::literal('l').parse_next(input_slice)?;    
 
     let res = comb::repeat_till(0.., parse_bencode, 'e').parse_next(input_slice)?;
@@ -174,18 +212,9 @@ pub fn parse_list<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextErro
 //     Example: d9:publisher3:bob17:publisher-webpage15:www.example.com18:publisher.location4:homee represents { "publisher" => "bob", "publisher-webpage" => "www.example.com", "publisher.location" => "home" }
 //     Example: de represents an empty dictionary {}
 
-pub fn parse_dictionary<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
+fn parse_dictionary<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
     token::literal('d').parse_next(input_slice)?;    
 
     let res: (BTreeMap<AST, AST>, char) = comb::repeat_till(0.., (parse_bytestring, parse_bencode), 'e').parse_next(input_slice)?;
     Ok(AST::Dictionary(res.0))
-}
-
-pub fn parse_bencode<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextError> {
-    comb::alt((
-        parse_integer.context(StrContext::Label("Parsing an Integer")),
-        parse_bytestring.context(StrContext::Label("Parsing a ByteString")),
-        parse_list.context(StrContext::Label("Parsing a List")),
-        parse_dictionary.context(StrContext::Label("Parsing a Dictionary")),
-    )).parse_next(input_slice)
 }
