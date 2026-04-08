@@ -1,0 +1,30 @@
+use torrent_reader::torrent_file as TF;
+use torrent_reader::bencoding_parser as BP;
+
+//  "announce" => "http://bt3.t-ru.org/ann",
+//   "announce-list" => [["http://bt3.t-ru.org/ann"], ["http://retracker.local/announce"]],
+//   "comment" => "https://rutracker.org/forum/viewtopic.php?t=1786135",
+//   "created by" => "uTorrent/1820",
+//   "creation date" => 1240585607,
+//   "encoding" => "UTF-8",
+
+#[test]
+fn test_wet_fly_fishing_parsing() {
+    let bytes = include_bytes!("../samples/Wet_Fly_Fishing.torrent");
+    let bytes: &mut &[u8] = &mut &bytes[..];
+
+    let ast = BP::parse_bencode(bytes).expect("Bencode decoding failed");
+
+    let torrent = TF::bentree_to_torrent_file(&ast).expect("Conversion to TorrentFile failed");
+
+    assert_eq!(torrent.announce, "http://bt3.t-ru.org/ann");
+    assert_eq!(torrent.announce_list,  vec![["http://bt3.t-ru.org/ann"], ["http://retracker.local/announce"]]);
+    assert_eq!(torrent.comment, "https://rutracker.org/forum/viewtopic.php?t=1786135");
+    assert_eq!(torrent.created_by, "uTorrent/1820");
+    assert_eq!(torrent.creation_date, 1240585607);
+    assert_eq!(torrent.encoding, "UTF-8");
+    assert_eq!(torrent.info.name, "Wet_Fly_Fishing_on_Rivers_Oliver_Edwards_[torrents.ru]");
+    
+    assert!(!torrent.info.pieces.is_empty(), "Pieces should not be empty");
+    assert_eq!(torrent.info.piece_length, 4194304);
+}

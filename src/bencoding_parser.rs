@@ -1,4 +1,3 @@
-use winnow::error::AddContext;
 use winnow::token as token;
 use winnow::ascii as ascii;
 use winnow::combinator as comb;
@@ -66,11 +65,53 @@ impl<'a> AST<'a> {
     }
 }
 
-impl<'a> std::fmt::Display for AST<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> fmt::Display for AST<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_with_indent(f, 0)
     }
 }
+
+impl<'a> AST<'a> {
+    pub fn get_from_dict(&'a self, key: &'a [u8]) -> Option<&'a AST<'a>> {
+        match self {
+            AST::Dictionary(map) => map.get(&AST::ByteString(key)),
+            _ => None,
+        }
+    }
+
+    pub fn get_int(&self, key: &[u8]) -> Option<i64> {
+        if let Some(AST::Integer(i)) = self.get_from_dict(key) {
+            return Some(*i);
+        }
+        None
+    }
+
+    pub fn get_str(&'a self, key: &'a [u8]) -> Option<&'a str> {
+        if let Some(AST::ByteString(b)) = self.get_from_dict(key) {
+            return str::from_utf8(b).ok();
+        }
+        None
+    }
+
+    pub fn get_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+        if let AST::List(l) = self {
+            let strings: Vec<&'a str> = l.iter()
+                .filter_map(
+                    |ast| {
+                    if let AST::ByteString(b) = ast {
+                        let str = str::from_utf8(*b).ok();
+                        return str;
+                    } else {
+                        None
+                    }})
+                .collect();
+                
+            return Some(strings);    
+        }
+        None
+    }    
+}
+
 
 // ByteStrings
 

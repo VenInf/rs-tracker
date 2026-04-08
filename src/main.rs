@@ -1,6 +1,6 @@
-mod parser;
+mod bencoding_parser;
+mod torrent_file;
 
-use std::fmt::format;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -27,12 +27,16 @@ fn main() -> io::Result<()> {
     
 
     println!("Read {} bytes from {}", input_slice.len(), file_path.display());
-    // println!("Parse input is {:?}", input_slice);
 
-    let output = parser::parse_bencode(&mut input_slice).unwrap();
+    let output = bencoding_parser::parse_bencode(&mut input_slice).unwrap();
 
     println!("Parse output is");
     println!("{}", output);
+
+    let torrent = torrent_file::bentree_to_torrent_file(&output);
+
+    // println!("Torrent file object is");
+    // println!("{:?}", torrent);
 
     return Ok(());
 }
