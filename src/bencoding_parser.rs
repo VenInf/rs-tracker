@@ -5,6 +5,7 @@ use winnow::{self, Parser};
 use winnow::error::{ContextError, Result, StrContext};
 use std::collections::BTreeMap;
 use std::fmt;
+use sha1::{Sha1, Digest};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AST<'a> {
@@ -97,6 +98,12 @@ impl<'a> AST<'a> {
         }
     }
 
+    pub fn hash(&'a self) -> [u8; 20] {
+        let bencode = self.construct_bencode();
+        Sha1::digest(bencode).into()
+    }
+
+    // TODO: rewrite this???
     pub fn get_from_dict(&'a self, key: &'a [u8]) -> Option<&'a AST<'a>> {
         match self {
             AST::Dictionary(map) => map.get(&AST::ByteString(key)),
@@ -104,10 +111,25 @@ impl<'a> AST<'a> {
         }
     }
 
+    pub fn int(&self) -> Option<i64> {
+        if let AST::Integer(i) = self {
+            return Some(*i);
+        }   
+        None
+    }
+
+
     pub fn get_int(&self, key: &[u8]) -> Option<i64> {
         if let Some(AST::Integer(i)) = self.get_from_dict(key) {
             return Some(*i);
         }
+        None
+    }
+
+    pub fn str(&self) -> Option<&'a str> {
+        if let AST::ByteString(bs) = self {
+            return str::from_utf8(bs).ok();
+        }   
         None
     }
 
@@ -118,23 +140,25 @@ impl<'a> AST<'a> {
         None
     }
 
-    pub fn get_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+    pub fn list(&'a self) -> Option<&'a Vec<AST<'a>>> {
         if let AST::List(l) = self {
-            let strings: Vec<&'a str> = l.iter()
-                .filter_map(
-                    |ast| {
-                    if let AST::ByteString(b) = ast {
-                        let str = str::from_utf8(*b).ok();
-                        return str;
-                    } else {
-                        None
-                    }})
-                .collect();
-                
-            return Some(strings);    
-        }
+            return Some(l);
+        }   
         None
+    }
+
+    pub fn get_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+        self.list().and_then(|l| l.iter().map(|bs| bs.str()).collect())
     }    
+
+    pub fn get_list_of_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+        self.list().map(|outer| {
+            outer.iter()
+                .filter_map(|inner| inner.get_list_of_str())
+                .flatten()                                  
+                .collect()
+        })
+    }  
 }
 
 
@@ -147,8 +171,6 @@ pub fn parse_bencode<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextE
         parse_dictionary.context(StrContext::Label("Parsing a Dictionary")),
     )).parse_next(input_slice)
 }
-
-
 
 
 // ByteStrings

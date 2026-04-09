@@ -2,11 +2,11 @@ use crate::bencoding_parser as BP;
 use std::{error::Error, fmt};
 
 #[derive(Debug)]
-pub struct TorrentTorrentFile<'a> {
-    pub announce: &'a str,
+pub struct TorrentFile<'a> {
     pub info: TorrentInfo<'a>,
-    // pub infoHash: todo!("Do the hash"),
-    pub announce_list: Option<Vec<Vec<&'a str>>>,
+    pub announce_list: Vec<&'a str>,
+    pub info_hash: [u8; 20],
+    pub announce: Option<&'a str>,
     pub comment:  Option<&'a str>,
     pub created_by:  Option<&'a str>,
     pub creation_date:  Option<i64>,
@@ -15,18 +15,23 @@ pub struct TorrentTorrentFile<'a> {
     pub publisher_url:  Option<&'a str>,
 }
 
-
-// TODO: Add single file mode
 #[derive(Debug)]
 pub struct TorrentInfo<'a> {
-    pub files: Vec<TorrentFile<'a>>,
+    pub file_data: FileData<'a>,
+    pub name: &'a str,
     pub piece_length: i64,
     pub pieces: Vec<[u8; 20]>,
-    pub name: &'a str,
+}
+
+
+#[derive(Debug)]
+pub enum FileData<'a> {
+    Single { length: i64 },
+    Multi { files: Vec<File<'a>> },
 }
 
 #[derive(Debug)]
-pub struct TorrentFile<'a> {
+pub struct File<'a> {
     pub length: i64,
     pub path: Vec<&'a str>,
 }
@@ -46,32 +51,16 @@ impl Error for ConversionError {}
 
 impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Failed to find [{}] field", self.failed_to_find)
+        write!(f, "Failed to find [{}] field(s)", self.failed_to_find)
     }
 }
 
-pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentTorrentFile<'a>, ConversionError> {
-    let announce = ast.get_str(b"announce").ok_or(ConversionError::new("announce"))?;
-
+pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile<'a>, ConversionError> {
+    let announce = ast.get_str(b"announce");
 
     let info_dict = ast.get_from_dict(b"info").ok_or(ConversionError::new("info"))?;
-    let piece_length = info_dict.get_int(b"piece length").ok_or(ConversionError::new("piece length"))?;
     let name = info_dict.get_str(b"name").ok_or(ConversionError::new("name"))?;
-
-    let Some(BP::AST::List(files_list)) = info_dict.get_from_dict(b"files") else {
-        return Err(ConversionError::new("files"));
-    };
-    
-    let opt_files: Option<Vec<TorrentFile>> = files_list
-                                             .into_iter()
-                                             .map(| node | Some(TorrentFile {
-                                                           length: node.get_int(b"length")?,
-                                                           path: node.get_from_dict(b"path")?.get_list_of_str()?
-                                             }))
-                                             .collect();
-
-    let files = opt_files.ok_or(ConversionError::new("files"))?;
-
+    let piece_length = info_dict.get_int(b"piece length").ok_or(ConversionError::new("piece length"))?;
     let Some(BP::AST::ByteString(pieces_raw)) = info_dict.get_from_dict(b"pieces") else {
         return Err(ConversionError::new("pieces"));
     };
@@ -81,21 +70,42 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentTorren
         .map(|c| c.try_into().unwrap())
         .collect();
 
+    let file_data = if let Some(length) = info_dict.get_int(b"length") {
+        FileData::Single { length }
+
+    } else {
+        if let Some(BP::AST::List(files_list)) = info_dict.get_from_dict(b"files") {
+        let opt_files: Option<Vec<File>> = files_list
+                                                .into_iter()
+                                                .map(| node | Some(File {
+                                                            length: node.get_int(b"length")?,
+                                                            path: node.get_from_dict(b"path")?.get_list_of_str()?
+                                                }))
+                                                .collect();
+
+        let files = opt_files.ok_or(ConversionError::new("files"))?;
+        FileData::Multi { files }
+        
+        } else {
+            return Err(ConversionError::new("length | files"));
+        }
+    };
+
     let info = TorrentInfo {
-        files,
         name,
         piece_length,
         pieces,
+        file_data,
     };
 
-    let Some(BP::AST::List(announce_list_raw)) = ast.get_from_dict(b"announce-list") else {
-        return Err(ConversionError::new("announce_list"));
-    };
-    let announce_list: Option<Vec<Vec<&str>>> = announce_list_raw
-                                                .into_iter()
-                                                .map(| node | node.get_list_of_str())
-                                                .collect();
-    
+    // TODO: Make a general solution for this(?)
+
+    let announce_list: Option<Vec<&str>> = ast.get_from_dict(b"announce-list").and_then(|node| node.get_list_of_list_of_str());
+    let url_list: Option<Vec<&str>> = ast.get_from_dict(b"url-list")
+                                         .and_then(| node | node.get_list_of_str());
+
+    let announce_list: Vec<&str> = announce_list.or(url_list).ok_or(ConversionError::new("announce-list | url-list"))?;
+
     let comment = ast.get_str(b"comment");
     let created_by = ast.get_str(b"created by");
     let creation_date = ast.get_int(b"creation date");
@@ -103,8 +113,9 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentTorren
     let publisher = ast.get_str(b"publisher");
     let publisher_url = ast.get_str(b"publisher-url");
 
-    Ok(TorrentTorrentFile {
+    Ok(TorrentFile {
         announce,
+        info_hash: info_dict.hash(),
         info,
         announce_list,
         comment,

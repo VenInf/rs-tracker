@@ -14,7 +14,7 @@ struct Cli {
 
 // TODO: add parser that parses all utf-8 characters with `winnow`
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = <Cli as clap::Parser>::parse();
     let file_path = &args.path;
     
@@ -30,13 +30,13 @@ fn main() -> io::Result<()> {
 
     let output = bencoding_parser::parse_bencode(&mut input_slice).unwrap();
 
-    println!("Parse output is");
-    println!("{}", output);
+    // println!("Parse output is");
+    // println!("{}", output);
 
-    let torrent = torrent_file::bentree_to_torrent_file(&output);
+    let torrent = torrent_file::bentree_to_torrent_file(&output)?;
 
-    // println!("Torrent file object is");
-    // println!("{:?}", torrent);
+    println!("Torrent file object is");
+    println!("{:?}", torrent.announce_list);
 
     return Ok(());
 }
