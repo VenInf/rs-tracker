@@ -172,7 +172,6 @@ pub fn parse_bencode<'a>(input_slice: &mut &'a [u8]) -> Result<AST<'a>, ContextE
     )).parse_next(input_slice)
 }
 
-
 // ByteStrings
 
 // Byte strings are encoded as follows: <string length encoded in base ten ASCII>:<string data>
