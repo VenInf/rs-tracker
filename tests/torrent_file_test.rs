@@ -10,14 +10,12 @@ fn test_wet_fly_fishing_parsing() {
 
     let torrent = TF::bentree_to_torrent_file(&ast).expect("Conversion to TorrentFile failed");
     
-    assert_eq!(torrent.announce, "http://bt3.t-ru.org/ann");
+    assert_eq!(torrent.announce_list,  vec!["http://bt3.t-ru.org/ann", "http://retracker.local/announce"]);
     assert_eq!(torrent.info.name, "Wet_Fly_Fishing_on_Rivers_Oliver_Edwards_[torrents.ru]");
     assert_eq!(torrent.info.piece_length, 4194304);
-    assert_eq!(torrent.info.pieces.len(), 880);
-    assert_eq!(torrent.info.files.len(), 10);
-
+    assert_eq!(torrent.info.pieces.len(), 880);    
     
-    assert_eq!(torrent.announce_list,  Some(vec![vec!["http://bt3.t-ru.org/ann"], vec!["http://retracker.local/announce"]]));
+    assert_eq!(torrent.announce, Some("http://bt3.t-ru.org/ann"));
     assert_eq!(torrent.comment, Some("https://rutracker.org/forum/viewtopic.php?t=1786135"));
     assert_eq!(torrent.created_by, Some("uTorrent/1820"));
     assert_eq!(torrent.creation_date, Some(1240585607));

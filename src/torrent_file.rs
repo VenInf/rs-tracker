@@ -1,12 +1,17 @@
 use crate::bencoding_parser as BP;
 use std::{error::Error, fmt};
 
+// TODO: add support for the `url_list` (BEP 19)
+// TODO: add getter for announces(?)
+
 #[derive(Debug)]
 pub struct TorrentFile<'a> {
     pub info: TorrentInfo<'a>,
-    pub announce_list: Vec<&'a str>,
     pub info_hash: [u8; 20],
+    pub left_initial: i64,
     pub announce: Option<&'a str>,
+    pub announce_list: Option<Vec<&'a str>>,
+    pub url_list: Option<Vec<&'a str>>,
     pub comment:  Option<&'a str>,
     pub created_by:  Option<&'a str>,
     pub creation_date:  Option<i64>,
@@ -91,6 +96,11 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile<'
         }
     };
 
+    let left_initial: i64 = match file_data {
+        FileData::Single { length } => length,
+        FileData::Multi { ref files } => files.iter().map(|file| file.length).sum()
+    };
+
     let info = TorrentInfo {
         name,
         piece_length,
@@ -98,13 +108,8 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile<'
         file_data,
     };
 
-    // TODO: Make a general solution for this(?)
-
     let announce_list: Option<Vec<&str>> = ast.get_from_dict(b"announce-list").and_then(|node| node.get_list_of_list_of_str());
-    let url_list: Option<Vec<&str>> = ast.get_from_dict(b"url-list")
-                                         .and_then(| node | node.get_list_of_str());
-
-    let announce_list: Vec<&str> = announce_list.or(url_list).ok_or(ConversionError::new("announce-list | url-list"))?;
+    let url_list: Option<Vec<&str>> = ast.get_from_dict(b"url-list").and_then(| node | node.get_list_of_str());
 
     let comment = ast.get_str(b"comment");
     let created_by = ast.get_str(b"created by");
@@ -114,10 +119,12 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile<'
     let publisher_url = ast.get_str(b"publisher-url");
 
     Ok(TorrentFile {
-        announce,
-        info_hash: info_dict.hash(),
         info,
+        info_hash: info_dict.hash(),
+        left_initial,
+        announce,
         announce_list,
+        url_list,
         comment,
         created_by,
         creation_date,
