@@ -6,7 +6,7 @@ fn test_parsing_identity() {
     let bytes: &mut &[u8] = &mut &original_bytes[..];
 
     let ast = BP::parse_bencode(bytes).expect("Bencode decoding failed");
-    let constructed_bencode = ast.construct_bencode();
+    let constructed_bencode = ast.serialize();
 
     assert_eq!(original_bytes.to_vec(), constructed_bencode);
 }

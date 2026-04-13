@@ -73,7 +73,7 @@ impl<'a> fmt::Display for AST<'a> {
 }
 
 impl<'a> AST<'a> {
-    pub fn construct_bencode(&'a self) -> Vec<u8> {
+    pub fn serialize(&'a self) -> Vec<u8> {
         match self {
             AST::ByteString(bs) => {
                 let len_bytes: Vec<u8> = bs.len().to_string().into_bytes();
@@ -85,14 +85,14 @@ impl<'a> AST<'a> {
             }
             AST::List(l) => {
                 let list_bytes: Vec<u8> =
-                    l.iter().flat_map(|node| node.construct_bencode()).collect();
+                    l.iter().flat_map(|node| node.serialize()).collect();
                 [b"l".to_vec(), list_bytes, b"e".to_vec()].concat()
             }
             AST::Dictionary(d) => {
                 let mut dict_bytes = Vec::new();
                 for (key, value) in d {
-                    dict_bytes.extend(key.construct_bencode());
-                    dict_bytes.extend(value.construct_bencode());
+                    dict_bytes.extend(key.serialize());
+                    dict_bytes.extend(value.serialize());
                 }
                 [b"d".to_vec(), dict_bytes, b"e".to_vec()].concat()
             }
@@ -100,7 +100,7 @@ impl<'a> AST<'a> {
     }
 
     pub fn hash(&'a self) -> [u8; 20] {
-        let bencode = self.construct_bencode();
+        let bencode = self.serialize();
         Sha1::digest(bencode).into()
     }
 
