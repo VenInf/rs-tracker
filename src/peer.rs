@@ -1,51 +1,60 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::{Error, ErrorKind};
+use crate::handshake;
 
 pub struct ConnectedPeer {
     pub stream: TcpStream,
     pub peer_id: [u8; 20],
 }
 
-pub struct Response;
-
 impl ConnectedPeer {
     pub async fn new(
-        address: (String, u16), // e.g., "192.168.1.10:6881"
+        address: (String, u16),
         info_hash: [u8; 20],
         my_peer_id: [u8; 20],
     ) -> Result<Self, Error> {
         let addr = format!("{}:{}", address.0, address.1);
         let mut stream = TcpStream::connect(addr).await?;
 
-        // Create a handshake message
-        let handshake = b"";
-
-        stream.write_all(handshake).await?;
+        let handshake = handshake::Handshake { info_hash, peer_id: my_peer_id };
+        stream.write_all(&handshake.serialize()).await?;
 
         let mut response = [0u8; 68];
         stream.read_exact(&mut response).await?;
 
-        // Parse response
+        let response_handshake = handshake::Handshake::parse(response)?;
 
-        // Check info hash
-        if response[28..48] != info_hash {
-            return Err(Error::new(ErrorKind::ConnectionAborted, "Wrong hash response"));
+        if response_handshake.info_hash != info_hash {
+            return Err(Error::new(ErrorKind::InvalidData, "Wrong hash response"));
         }
-
-        // Extract the Peer's ID
-        let mut remote_peer_id = [];
 
         Ok(Self {
             stream,
-            peer_id: remote_peer_id,
+            peer_id: response_handshake.peer_id,
         })
     }
 
-    pub async fn send_request(piece_index: i64, offset: i64, len: i64) -> Result<Response, Error> {
-        let res = Response;
-        Ok(res)
+    pub async fn send_message(mut self, message: TorrentTcpMessage) -> Result<(), Error> {
+        self.stream.write_all(message.serialize().as_slice()).await?;        
+        Ok(())
     }
+
+    pub async fn read_message(mut self) -> Result<TorrentTcpMessage, Error> {
+        let length = self.stream.read_u32().await? as usize;
+
+        if length == 0 {
+            return Ok(TorrentTcpMessage::KeepAlive);
+        }
+
+        let id = self.stream.read_u8().await?;
+
+        let payload_len = length - 1;
+        let mut payload = vec![0u8; payload_len];
+        self.stream.read_exact(&mut payload).await?;
+
+        TorrentTcpMessage::parse(id, payload.as_slice())
+    }    
 }
 
 pub enum TorrentTcpMessage {
@@ -62,7 +71,7 @@ pub enum TorrentTcpMessage {
 }
 
 impl TorrentTcpMessage {
-    pub fn parse(id: u8, payload: &[u8]) -> Result<Self, String> {
+    pub fn parse(id: u8, payload: &[u8]) -> Result<Self, Error> {
         match id {
             0 => Ok(TorrentTcpMessage::Choke),
             1 => Ok(TorrentTcpMessage::Unchoke),
@@ -86,7 +95,7 @@ impl TorrentTcpMessage {
                 Ok(TorrentTcpMessage::Piece { index, begin, block })
             }
             // Add other IDs as needed
-            _ => Err(format!("Unknown Message ID: {}", id)),
+            _ => Err(Error::new(ErrorKind::InvalidData, format!("Unknown Message ID: {}", id))),
         }
     }
 
@@ -135,8 +144,7 @@ impl TorrentTcpMessage {
             .chain(std::iter::once(id))
             .chain(payload.iter().copied())
             .collect()
-    }
-          
+    }     
 }
 
 
