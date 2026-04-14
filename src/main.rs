@@ -1,6 +1,7 @@
 mod announce;
 mod bencoding_parser;
 mod torrent_file;
+mod handshake;
 mod peer;
 mod pieces;
 
@@ -33,7 +34,7 @@ async fn main() -> Result<(), Error> {
     let torrent_ast = bencoding_parser::parse_bencode(&mut input_slice).unwrap();
     println!("Torrent AST: {}", torrent_ast);
 
-    let torrent_file = torrent_file::bentree_to_torrent_file(&torrent_ast)?;
+    let torrent_file = torrent_file::bentree_to_torrent_file(&torrent_ast).map_err(|_| Error::new(ErrorKind::InvalidInput, "Failed to get torrent file from ast"))?;
     println!("Torrent File: {:?}", torrent_file);
 
     let Some(announce_url) = torrent_file.announce else {
@@ -55,12 +56,12 @@ async fn main() -> Result<(), Error> {
 
     println!("{}", announce_ast);
 
-    let announce_response = announce::parse_announce_response(announce_ast)?;
+    let announce_response = announce::parse_announce_response(announce_ast).map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
     println!("{:?}", announce_response);
     
 
     let peer_address = announce_response.peers.first().ok_or(Error::new(ErrorKind::InvalidData, "No first peer to select"))?;
-    let connected_peer = peer::ConnectedPeer::new(peer_address.clone(), torrent_file.info_hash, my_peer_id.clone()).await?;
+    let mut connected_peer = peer::ConnectedPeer::new(peer_address.clone(), torrent_file.info_hash, my_peer_id.clone()).await?;
     
     let mut bitfield = vec![];
     let mut chocked = true;
@@ -92,12 +93,13 @@ async fn main() -> Result<(), Error> {
         return Err(Error::new(ErrorKind::ConnectionRefused, format!("Failed to unchoke")));
     }
 
-    let pieces = pieces::Pieces::new(&torrent_file.info)?;
-    for (idx, piece) in pieces.pieces_vec.iter().enumerate() {
+    let mut pieces = pieces::Pieces::new(&torrent_file.info)?;
+    
+    for (idx, piece) in pieces.pieces_vec.iter_mut().enumerate() {
         piece.download_from(&mut connected_peer, pieces.piece_length, idx as u32).await?
     }    
 
-    pieces.write_to_disk(torrent_file.comment.unwrap_or("no-name"));
+    pieces.write_to_disk(torrent_file.comment.unwrap_or("no-name"))?;
 
     return Ok(());
 }

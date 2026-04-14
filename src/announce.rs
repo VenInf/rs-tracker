@@ -1,6 +1,6 @@
 use crate::bencoding_parser as BP;
 use crate::torrent_file as TF;
-use std::error::Error;
+use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -11,7 +11,7 @@ pub async fn announce_to_tracker<'a>(
     peer_id: &[u8; 20],
     torrent_file: &TF::TorrentFile<'a>,
     port: u16,
-) -> Result<Vec<u8>, Box<dyn Error>> {
+) -> Result<Vec<u8>, Error> {
     let query = form_urlencoded::Serializer::new(String::new())
         .append_pair("peer_id", unsafe { std::str::from_utf8_unchecked(peer_id) })
         .append_pair("info_hash", unsafe {
@@ -30,14 +30,14 @@ pub async fn announce_to_tracker<'a>(
 
     let client = reqwest::Client::new();
 
-    let response = client.get(full_url).send().await?;
+    let response = client.get(&full_url).send().await.map_err(|_e| Error::new(ErrorKind::ConnectionRefused , format!("Failed to get {}", full_url)))?;
 
-    let bytes = response.bytes().await?;
+    let bytes = response.bytes().await.map_err(|_e| Error::new(ErrorKind::InvalidData , "Failed to get bytes"))?;
 
     Ok(bytes.to_vec())
 }
 
-pub async fn save_file(path: &str, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn save_file(path: &str, data: &[u8]) -> Result<(), Error> {
     let mut file = File::create(path).await?;
     file.write_all(data).await?;
     Ok(())
