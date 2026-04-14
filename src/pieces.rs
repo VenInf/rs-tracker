@@ -1,12 +1,15 @@
-use reqwest::Error;
-use crate::peer::ConnectedPeer;
-// TODO: cnahge the size to the box type
+use std::{io::{Error, ErrorKind}};
+use sha1::{Digest, Sha1};
+use std::fs::OpenOptions;
+use std::io::{Write, Seek, SeekFrom};
+
+use crate::{peer::{ConnectedPeer, TorrentTcpMessage}, torrent_file::{FileData, TorrentInfo}};
 
 #[derive(Debug, Clone)]
 pub struct Pieces {
-    pub pieces: Vec<Piece>,
-    pub piece_length: i64,
-    pub length: i64,
+    pub pieces_vec: Vec<Piece>,
+    pub piece_length: u32,
+    pub length: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -16,25 +19,91 @@ pub struct Piece {
 }
 
 impl Pieces {
-    pub fn bitfield(self) -> Vec<u8> {
-        self.pieces.iter().map(|p| p.piece_data.is_some() as u8).collect()
+    pub fn new(info: &TorrentInfo) -> Result<Self, Error> {
+        let FileData::Single { length } = info.file_data else {
+            return Err(Error::new(ErrorKind::InvalidInput, format!("Multifile torrent is not supported")));
+        };
+        
+        let mut pieces_vec = vec![]; 
+
+        for hash in info.pieces.clone() {
+            let piece = Piece { piece_hash: hash, piece_data: None};
+            pieces_vec.push(piece);
+        }
+        
+        Ok(Pieces { pieces_vec, piece_length: info.piece_length as u32, length: length as u32})
     }
 
+    pub fn bitfield(self) -> Vec<u8> {
+        self.pieces_vec.iter().map(|p| p.piece_data.is_some() as u8).collect()
+    }
 
-    async fn download_from(self, peer: &mut ConnectedPeer, piece_length: i64, piece_index: u32) -> Result<Vec<u8>, Error> {
-        let block_size = 16384;
-        let mut buffer = vec![0u8; piece_length as usize];
+    pub fn write_to_disk(&self, filename: &str) -> Result<(), Error> {
+        println!("Attempt to write to disc");
 
-        for offset in (0..piece_length).step_by(block_size as usize) {
-            let len = std::cmp::min(block_size, piece_length - offset);
-    
-            let response = peer.send_request(piece_index, offset, len).await?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(filename)?;
+
+        file.set_len(self.length as u64)?;
+
+        for (idx, piece) in self.pieces_vec.iter().enumerate() {
+            let offset = (idx as u64) * (self.piece_length as u64);
+            file.seek(SeekFrom::Start(offset))?;
             
-            // TODO: add the block to the buffer
-
+            let Some(piece_data) = &piece.piece_data else { continue; };
+            file.write_all(piece_data.as_slice())?;
         }
 
-        Ok(buffer)
+        Ok(())
+    }    
+}
+
+
+
+impl Piece {
+    pub async fn download_from(&mut self, peer: &mut ConnectedPeer, piece_length: u32, piece_index: u32) -> Result<(), Error> {
+        // TODO: Make a simple optimistic downloader first, make a queue with checking later
+
+        let block_size = 16384;
+        let mut piece_data = vec![0u8; piece_length as usize];
+        
+        for offset in (0..piece_length).step_by(block_size as usize) {
+            let length = std::cmp::min(block_size, piece_length - offset);
+            let req_message = TorrentTcpMessage::Request { index: piece_index, begin: offset, length };            
+            peer.send_message(req_message).await?;
+            
+            let response = peer.read_message().await?;
+
+            if let TorrentTcpMessage::Piece { index, begin, block } = response {
+                if index != piece_index {
+                    return Err(Error::new(ErrorKind::InvalidData, "Received block for wrong piece"));
+                }
+
+                println!("DEBUG: Caught a piece with index: {}, begin: {}", index, begin);
+                
+                let start = begin as usize;
+                let end = start + block.len();
+                
+                if end <= piece_data.len() {
+                    piece_data[start..end].copy_from_slice(&block);
+                } else {
+                    return Err(Error::new(ErrorKind::InvalidData, "Block exceeds piece length"));
+                }
+            } else {
+                return Err(Error::new(ErrorKind::ConnectionAborted, "Peer stopped sending blocks"));
+            }   
+        }
+
+        let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
+        
+        if self.piece_hash == piece_hash {
+            self.piece_data = Some(piece_data);
+        } else {
+            return Err(Error::new(ErrorKind::InvalidData, "Failed to verify the received block hash"));
+        }
+        Ok(())
     }
 }
 

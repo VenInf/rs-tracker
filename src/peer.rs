@@ -15,6 +15,7 @@ impl ConnectedPeer {
         my_peer_id: [u8; 20],
     ) -> Result<Self, Error> {
         let addr = format!("{}:{}", address.0, address.1);
+        println!("Attemt to connect at {}", addr);
         let mut stream = TcpStream::connect(addr).await?;
 
         let handshake = handshake::Handshake { info_hash, peer_id: my_peer_id };
@@ -35,12 +36,12 @@ impl ConnectedPeer {
         })
     }
 
-    pub async fn send_message(mut self, message: TorrentTcpMessage) -> Result<(), Error> {
+    pub async fn send_message(&mut self, message: TorrentTcpMessage) -> Result<(), Error> {
         self.stream.write_all(message.serialize().as_slice()).await?;        
         Ok(())
     }
 
-    pub async fn read_message(mut self) -> Result<TorrentTcpMessage, Error> {
+    pub async fn read_message(&mut self) -> Result<TorrentTcpMessage, Error> {
         let length = self.stream.read_u32().await? as usize;
 
         if length == 0 {
@@ -78,7 +79,7 @@ impl TorrentTcpMessage {
             2 => Ok(TorrentTcpMessage::Interested),
             3 => Ok(TorrentTcpMessage::NotInterested),
             4 => {
-                let index = u32::from_be_bytes(payload[0..4].try_into().map_err(|_| "Invalid Have")?);
+                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
                 Ok(TorrentTcpMessage::Have(index))
             }
             5 => Ok(TorrentTcpMessage::Bitfield(payload.to_vec())),

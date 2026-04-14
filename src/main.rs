@@ -1,10 +1,16 @@
 mod announce;
 mod bencoding_parser;
 mod torrent_file;
+mod peer;
+mod pieces;
 
+use std::time::Duration;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Error, ErrorKind, Read};
 use std::path::PathBuf;
+use tokio::time::timeout;
+
+use crate::peer::TorrentTcpMessage;
 
 #[derive(clap::Parser)]
 #[command(author, version, about = "torrent tracker")]
@@ -13,7 +19,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Error> {
     let args = <Cli as clap::Parser>::parse();
     let file_path = &args.path;
 
@@ -31,12 +37,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Torrent File: {:?}", torrent_file);
 
     let Some(announce_url) = torrent_file.announce else {
-        return Err("No announce_url".into());
+        return Err(Error::new(ErrorKind::InvalidData, "No announce-url"));
     };
 
-    let peer_id: &[u8; 20] = b"-GT0001-os9964142397"; // TODO: make a proper peer-id generator
+    let my_peer_id: &[u8; 20] = b"-GT0001-os9964142397"; // TODO: make a proper peer-id generator
     let announce_response =
-        announce::announce_to_tracker(announce_url, peer_id, &torrent_file, 6881).await?;
+        announce::announce_to_tracker(announce_url, my_peer_id, &torrent_file, 6881).await?;
 
     println!("Received {} bytes from tracker.", announce_response.len());
     let announce_bytes: &mut &[u8] = &mut announce_response.as_slice();
@@ -49,8 +55,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}", announce_ast);
 
-    let announce_response = announce::parse_announce_response(announce_ast);
+    let announce_response = announce::parse_announce_response(announce_ast)?;
     println!("{:?}", announce_response);
+    
+
+    let peer_address = announce_response.peers.first().ok_or(Error::new(ErrorKind::InvalidData, "No first peer to select"))?;
+    let connected_peer = peer::ConnectedPeer::new(peer_address.clone(), torrent_file.info_hash, my_peer_id.clone()).await?;
+    
+    let mut bitfield = vec![];
+    let mut chocked = true;
+
+    println!("DEBUG: Waiting for a bitfield");
+    let init_response = timeout(Duration::from_secs(10), connected_peer.read_message()).await?.ok();
+    if let Some(TorrentTcpMessage::Bitfield(bf)) = init_response {
+        println!("DEBUG: Caught bitfield: {:?}", bf);
+        bitfield = bf;
+    } else if let Some(TorrentTcpMessage::Unchoke) = init_response {
+        println!("DEBUG: Caught unchocke message");
+        chocked = false;
+    } else {
+        println!("DEBUG: No intial message sent");
+    }
+
+    let interested_message = TorrentTcpMessage::Interested;            
+    connected_peer.send_message(interested_message).await?;
+
+    let unchoke_response = timeout(Duration::from_secs(10), connected_peer.read_message()).await?.ok();
+    if let Some(TorrentTcpMessage::Unchoke) = unchoke_response {
+        println!("DEBUG: Caught unchocke message");
+        chocked = false;
+    } else {
+        println!("DEBUG: No response on interested message sent");
+    }
+
+    if chocked {
+        return Err(Error::new(ErrorKind::ConnectionRefused, format!("Failed to unchoke")));
+    }
+
+    let pieces = pieces::Pieces::new(&torrent_file.info)?;
+    for (idx, piece) in pieces.pieces_vec.iter().enumerate() {
+        piece.download_from(&mut connected_peer, pieces.piece_length, idx as u32).await?
+    }    
+
+    pieces.write_to_disk(torrent_file.comment.unwrap_or("no-name"));
 
     return Ok(());
 }
