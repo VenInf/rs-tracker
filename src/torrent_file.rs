@@ -2,7 +2,6 @@ use crate::bencoding_parser as BP;
 use std::{error::Error, fmt};
 
 // TODO: add support for the `url_list` (BEP 19)
-// TODO: add getter for announces(?)
 
 #[derive(Debug)]
 pub struct TorrentFile<'a> {

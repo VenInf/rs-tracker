@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::path::PathBuf;
 use tokio::time::timeout;
+use rand::seq::IndexedRandom;
 
 use crate::peer::TorrentTcpMessage;
 
@@ -60,7 +61,8 @@ async fn main() -> Result<(), Error> {
     println!("{:?}", announce_response);
     
 
-    let peer_address = announce_response.peers.first().ok_or(Error::new(ErrorKind::InvalidData, "No first peer to select"))?;
+    let peer_address = announce_response.peers.choose(&mut rand::rng()).ok_or(Error::new(ErrorKind::InvalidData, "No first peer to select"))?;
+    let peer_address = ("86.250.192.168".to_string(), 51523);
     let mut connected_peer = peer::ConnectedPeer::new(peer_address.clone(), torrent_file.info_hash, my_peer_id.clone()).await?;
     
     let mut bitfield = vec![];
@@ -101,5 +103,5 @@ async fn main() -> Result<(), Error> {
 
     pieces.write_to_disk(torrent_file.comment.unwrap_or("no-name"))?;
 
-    return Ok(());
+    Ok(())
 }

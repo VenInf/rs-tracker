@@ -95,6 +95,12 @@ impl TorrentTcpMessage {
                 let block = payload[8..].to_vec();
                 Ok(TorrentTcpMessage::Piece { index, begin, block })
             }
+            8 => {
+                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+                let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                let length = u32::from_be_bytes(payload[8..12].try_into().unwrap());
+                Ok(TorrentTcpMessage::Cancel { index, begin, length })
+            }
             // Add other IDs as needed
             _ => Err(Error::new(ErrorKind::InvalidData, format!("Unknown Message ID: {}", id))),
         }
@@ -106,11 +112,17 @@ impl TorrentTcpMessage {
             
            TorrentTcpMessage::Choke => self.packet(0, &[]),
            TorrentTcpMessage::Unchoke => self.packet(1, &[]),
+           TorrentTcpMessage::Interested => self.packet(2, &[]),
+           TorrentTcpMessage::NotInterested => self.packet(3, &[]),
             
            TorrentTcpMessage::Have(index) => {
                 self.packet(4, &index.to_be_bytes())
             }
             
+            TorrentTcpMessage::Bitfield(bf) => {
+                self.packet(5, &bf.as_slice())
+            }
+
            TorrentTcpMessage::Request { index, begin, length } => {
                 let payload = [
                     index.to_be_bytes(),
@@ -127,14 +139,23 @@ impl TorrentTcpMessage {
                 ].concat();
                 
                 let payload = header.iter().copied().chain(block.iter().copied());
-                
+
                 let len = (9 + block.len()) as u32;
                 len.to_be_bytes().into_iter()
                     .chain(std::iter::once(7))
                     .chain(payload)
                     .collect()
             }
-            _ => todo!()
+
+
+           TorrentTcpMessage::Cancel { index, begin, length } => {
+                let payload = [
+                    index.to_be_bytes(),
+                    begin.to_be_bytes(),
+                    length.to_be_bytes(),
+                ];
+                self.packet(8, payload.concat().as_slice())
+            }            
         }
     }
 

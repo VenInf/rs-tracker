@@ -65,6 +65,7 @@ impl Pieces {
 impl Piece {
     pub async fn download_from(&mut self, peer: &mut ConnectedPeer, piece_length: u32, piece_index: u32) -> Result<(), Error> {
         // TODO: Make a simple optimistic downloader first, make a queue with checking later
+        // Add the choke-unchoke here as well, discard all other messages
 
         let block_size = 16384;
         let mut piece_data = vec![0u8; piece_length as usize];
