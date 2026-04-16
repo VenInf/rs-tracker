@@ -1,10 +1,16 @@
 use tokio::net::TcpStream;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::{Error, ErrorKind};
 use crate::handshake;
+use crate::pieces::{Piece, PieceDownloaded, PieceTask};
+use sha1::{Digest, Sha1};
+use futures_util::{StreamExt, SinkExt};
 
 pub struct ConnectedPeer {
-    pub stream: TcpStream,
+    // pub stream: TcpStream,
+    pub framed_stream:  Framed<TcpStream, LengthDelimitedCodec>,
+    pub chocked: bool,
     pub peer_id: [u8; 20],
 }
 
@@ -17,6 +23,7 @@ impl ConnectedPeer {
         let addr = format!("{}:{}", address.0, address.1);
         println!("Attemt to connect at {}", addr);
         let mut stream = TcpStream::connect(addr).await?;
+        // We can use `LengthDelimitedCodec` since bittorrent protocol appends the length of the message at the start
 
         let handshake = handshake::Handshake { info_hash, peer_id: my_peer_id };
         stream.write_all(&handshake.serialize()).await?;
@@ -27,34 +34,76 @@ impl ConnectedPeer {
         let response_handshake = handshake::Handshake::parse(response)?;
 
         if response_handshake.info_hash != info_hash {
-            return Err(Error::new(ErrorKind::InvalidData, "Wrong hash response"));
+            return Err(Error::new(ErrorKind::InvalidData, "Wrong handshake hash response"));
         }
 
+        let framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
         Ok(Self {
-            stream,
+            framed_stream,
+            chocked: true,
             peer_id: response_handshake.peer_id,
         })
     }
 
     pub async fn send_message(&mut self, message: TorrentTcpMessage) -> Result<(), Error> {
-        self.stream.write_all(message.serialize().as_slice()).await?;        
+        self.framed_stream.send(message.serialize().into()).await?;      
         Ok(())
     }
 
     pub async fn read_message(&mut self) -> Result<TorrentTcpMessage, Error> {
-        let length = self.stream.read_u32().await? as usize;
+        if let Some(frame) = self.framed_stream.next().await {
+            let raw_message = frame?;
 
-        if length == 0 {
-            return Ok(TorrentTcpMessage::KeepAlive);
+            if let Some((id, payload)) = raw_message.split_first() {
+                return TorrentTcpMessage::parse(id, payload);
+            } else {
+                return Ok(TorrentTcpMessage::KeepAlive);
+            }
+        } else {
+            Err(Error::new(ErrorKind::ConnectionAborted, "Peer stopped sending blocks"))
+        }
+    }
+
+    pub async fn download_piece(&mut self, task: PieceTask) -> Result<PieceDownloaded, Error> {
+        // Add the choke-unchoke here as well, discard all other messages
+
+        let block_size = 16384;
+        let mut piece_data = vec![0u8; task.piece_length as usize];
+        
+        for offset in (0..task.piece_length).step_by(block_size as usize) {
+            let length = std::cmp::min(block_size, task.piece_length - offset);
+            let req_message = TorrentTcpMessage::Request { index: task.piece_index, begin: offset, length };            
+            self.send_message(req_message).await?;
+            
+            let response = self.read_message().await?;
+
+            if let TorrentTcpMessage::Piece { index, begin, block } = response {
+                if index != task.piece_index {
+                    return Err(Error::new(ErrorKind::InvalidData, "Received block for wrong piece"));
+                }
+
+                println!("DEBUG: Caught a piece with index: {}, begin: {}", index, begin);
+                
+                let start = begin as usize;
+                let end = start + block.len();
+                
+                if end <= piece_data.len() {
+                    piece_data[start..end].copy_from_slice(&block);
+                } else {
+                    return Err(Error::new(ErrorKind::InvalidData, "Block exceeds piece length"));
+                }
+            } else {
+                return Err(Error::new(ErrorKind::ConnectionAborted, "Peer stopped sending blocks"));
+            }   
         }
 
-        let id = self.stream.read_u8().await?;
-
-        let payload_len = length - 1;
-        let mut payload = vec![0u8; payload_len];
-        self.stream.read_exact(&mut payload).await?;
-
-        TorrentTcpMessage::parse(id, payload.as_slice())
+        let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
+        
+        if task.piece_hash == piece_hash {
+            return Ok(PieceDownloaded {piece_data, piece_task: task});
+        } else {
+            return Err(Error::new(ErrorKind::InvalidData, "Failed to verify the received block hash"));
+        }
     }    
 }
 
@@ -72,7 +121,7 @@ pub enum TorrentTcpMessage {
 }
 
 impl TorrentTcpMessage {
-    pub fn parse(id: u8, payload: &[u8]) -> Result<Self, Error> {
+    pub fn parse(id: &u8, payload: &[u8]) -> Result<Self, Error> {
         match id {
             0 => Ok(TorrentTcpMessage::Choke),
             1 => Ok(TorrentTcpMessage::Unchoke),

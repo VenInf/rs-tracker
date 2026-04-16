@@ -18,10 +18,23 @@ pub struct Piece {
     pub piece_data: Option<Vec<u8>>
 }
 
+#[derive(Debug, Clone)]
+pub struct PieceTask {
+    pub piece_hash: [u8; 20],
+    pub piece_index: u32,
+    pub piece_length: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PieceDownloaded {
+    pub piece_data: Vec<u8>,
+    pub piece_task: PieceTask
+}
+
 impl Pieces {
     pub fn new(info: &TorrentInfo) -> Result<Self, Error> {
         let FileData::Single { length } = info.file_data else {
-            return Err(Error::new(ErrorKind::InvalidInput, format!("Multifile torrent is not supported")));
+            return Err(Error::new(ErrorKind::InvalidInput, "Multifile torrent is not supported"));
         };
         
         let mut pieces_vec = vec![]; 
