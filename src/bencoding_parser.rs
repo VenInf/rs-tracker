@@ -105,9 +105,11 @@ impl<'a> AST<'a> {
     }
 
     // TODO: rewrite this???
-    pub fn get_from_dict(&'a self, key: &'a [u8]) -> Option<&'a AST<'a>> {
+    pub fn get_from_dict(&'a self, key: &'a[u8]) -> Option<&'a AST<'a>> {
         match self {
-            AST::Dictionary(map) => map.get(&AST::ByteString(key)),
+            AST::Dictionary(map) => {
+                map.get(&AST::ByteString(key))
+            }
             _ => None,
         }
     }
@@ -119,23 +121,23 @@ impl<'a> AST<'a> {
         None
     }
 
-    pub fn get_int(&self, key: &[u8]) -> Option<i64> {
+    pub fn get_int(&self, key: &'a[u8]) -> Option<i64> {
         if let Some(AST::Integer(i)) = self.get_from_dict(key) {
             return Some(*i);
         }
         None
     }
 
-    pub fn str(&self) -> Option<&'a str> {
+    pub fn str(&self) -> Option<String> {
         if let AST::ByteString(bs) = self {
-            return str::from_utf8(bs).ok();
+            return String::from_utf8(bs.to_vec()).ok();
         }
         None
     }
 
-    pub fn get_str(&'a self, key: &'a [u8]) -> Option<&'a str> {
+    pub fn get_str(&'a self, key: &'a[u8]) -> Option<String> {
         if let Some(AST::ByteString(b)) = self.get_from_dict(key) {
-            return str::from_utf8(b).ok();
+            return String::from_utf8(b.to_vec()).ok();
         }
         None
     }
@@ -147,12 +149,12 @@ impl<'a> AST<'a> {
         None
     }
 
-    pub fn get_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+    pub fn get_list_of_str(&'a self) -> Option<Vec<String>> {
         self.list()
             .and_then(|l| l.iter().map(|bs| bs.str()).collect())
     }
 
-    pub fn get_list_of_list_of_str(&'a self) -> Option<Vec<&'a str>> {
+    pub fn get_list_of_list_of_str(&'a self) -> Option<Vec<String>> {
         self.list().map(|outer| {
             outer
                 .iter()

@@ -7,9 +7,9 @@ use tokio::io::AsyncWriteExt;
 use url::form_urlencoded;
 
 pub async fn announce_to_tracker<'a>(
-    url: &str,
+    url: &String,
     peer_id: &[u8; 20],
-    torrent_file: &TF::TorrentFile<'a>,
+    torrent_file: &TF::TorrentFile,
     port: u16,
 ) -> Result<Vec<u8>, Error> {
     let query = form_urlencoded::Serializer::new(String::new())

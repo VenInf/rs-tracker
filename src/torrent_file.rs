@@ -3,43 +3,43 @@ use std::{error::Error, fmt};
 
 // TODO: add support for the `url_list` (BEP 19)
 
-#[derive(Debug)]
-pub struct TorrentFile<'a> {
-    pub info: TorrentInfo<'a>,
+#[derive(Debug, Clone)]
+pub struct TorrentFile {
+    pub info: TorrentInfo,
     pub info_hash: [u8; 20],
     pub left_initial: i64,
-    pub announce: Option<&'a str>,
-    pub announce_list: Option<Vec<&'a str>>,
-    pub url_list: Option<Vec<&'a str>>,
-    pub comment: Option<&'a str>,
-    pub created_by: Option<&'a str>,
+    pub announce: Option<String>,
+    pub announce_list: Option<Vec<String>>,
+    pub url_list: Option<Vec<String>>,
+    pub comment: Option<String>,
+    pub created_by: Option<String>,
     pub creation_date: Option<i64>,
-    pub encoding: Option<&'a str>,
-    pub publisher: Option<&'a str>,
-    pub publisher_url: Option<&'a str>,
+    pub encoding: Option<String>,
+    pub publisher: Option<String>,
+    pub publisher_url: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct TorrentInfo<'a> {
-    pub file_data: FileData<'a>,
-    pub name: &'a str,
+#[derive(Debug, Clone)]
+pub struct TorrentInfo {
+    pub file_data: FileData,
+    pub name: String,
     pub piece_length: i64,
-    pub pieces: Vec<[u8; 20]>,
+    pub piece_hashes: Vec<[u8; 20]>,
 }
 
-#[derive(Debug)]
-pub enum FileData<'a> {
+#[derive(Debug, Clone)]
+pub enum FileData {
     Single { length: i64 },
-    Multi { files: Vec<File<'a>> },
+    Multi { files: Vec<File> },
 }
 
-#[derive(Debug)]
-pub struct File<'a> {
+#[derive(Debug, Clone)]
+pub struct File {
     pub length: i64,
-    pub path: Vec<&'a str>,
+    pub path: Vec<String>,
 }
 
-impl<'a> FileData<'a> {
+impl FileData {
     pub fn total_length(self) -> u64 {
         match self {
             FileData::Single { length } => length as u64,
@@ -71,7 +71,7 @@ impl fmt::Display for ConversionError {
 
 pub fn bentree_to_torrent_file<'a>(
     ast: &'a BP::AST<'a>,
-) -> Result<TorrentFile<'a>, ConversionError> {
+) -> Result<TorrentFile, ConversionError> {
     let announce = ast.get_str(b"announce");
 
     let info_dict = ast
@@ -87,7 +87,7 @@ pub fn bentree_to_torrent_file<'a>(
         return Err(ConversionError::new("pieces"));
     };
 
-    let pieces: Vec<[u8; 20]> = pieces_raw
+    let piece_hashes: Vec<[u8; 20]> = pieces_raw
         .chunks_exact(20)
         .map(|c| c.try_into().unwrap())
         .collect();
@@ -121,14 +121,14 @@ pub fn bentree_to_torrent_file<'a>(
     let info = TorrentInfo {
         name,
         piece_length,
-        pieces,
+        piece_hashes,
         file_data,
     };
 
-    let announce_list: Option<Vec<&str>> = ast
+    let announce_list: Option<Vec<String>> = ast
         .get_from_dict(b"announce-list")
         .and_then(|node| node.get_list_of_list_of_str());
-    let url_list: Option<Vec<&str>> = ast
+    let url_list: Option<Vec<String>> = ast
         .get_from_dict(b"url-list")
         .and_then(|node| node.get_list_of_str());
 

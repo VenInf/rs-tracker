@@ -25,11 +25,11 @@ pub struct ConnectedPeer {
     pub peer_id: [u8; 20],
     framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
     choked: Arc<AtomicBool>,
-    peer_bitfield: Arc<Mutex<Bitfield>>,
+    pub peer_bitfield: Arc<Mutex<Bitfield>>,
     tasks_sender: mpsc::Sender<Task>,
     tasks_receiver: mpsc::Receiver<Task>,
     pub downloaded: mpsc::Sender<PieceDownloaded>,
-    caught_block_pieces: Arc<Mutex<Vec<BlockPiece>>>,
+    caught_piece_responses: Arc<Mutex<Vec<PieceResponse>>>,
     shared_downloads: Arc<SharedDownloads>
 }
 
@@ -98,7 +98,7 @@ impl ConnectedPeer {
             peer_bitfield: Arc::new(Mutex::new(Bitfield::new(total_pieces_length))),
             framed_stream: Framed::new(stream, LengthDelimitedCodec::new()), // We can use `LengthDelimitedCodec` since bittorrent protocol appends the length of the message at the start
             choked: AtomicBool::new(true).into(),
-            caught_block_pieces: Arc::new(Mutex::new(vec![])),
+            caught_piece_responses: Arc::new(Mutex::new(vec![])),
             tasks_sender,
             tasks_receiver,
             downloaded,
@@ -114,7 +114,7 @@ impl ConnectedPeer {
         let choked = self.choked.clone();
         let peer_bitfield = self.peer_bitfield.clone();
 
-        let caught_block_pieces = self.caught_block_pieces.clone();
+        let caught_piece_responses = self.caught_piece_responses.clone();
 
         // Check that the order is correct
         let bitfield = self.shared_downloads.bitfield.read().await.clone();
@@ -140,11 +140,11 @@ impl ConnectedPeer {
                         continue;
                     }
                     TorrentTcpMessage::Piece { index, begin, block } => {
-                        let mut pieces = caught_block_pieces.lock().await;
-                        let bp = BlockPiece { index, begin, block };
+                        let mut pieces = caught_piece_responses.lock().await;
+                        let pr = PieceResponse { index, begin, block };
                         // No duplicates stored
-                        if !pieces.contains(&bp) {
-                            pieces.push(bp);
+                        if !pieces.contains(&pr) {
+                            pieces.push(pr);
                         }
                     } 
                     TorrentTcpMessage::Request { index, begin, length } => {
@@ -182,7 +182,7 @@ impl ConnectedPeer {
                         }
                         Task::Response(PieceResponse { index, begin, block }) => {
                             let resonse_message = TorrentTcpMessage::Piece { index, begin, block };
-                            send_message(&mut sink, resonse_message).await;
+                            let _ = send_message(&mut sink, resonse_message).await;
                         }
 
                     }
@@ -191,7 +191,7 @@ impl ConnectedPeer {
         });
         
 
-        let caught_block_pieces = self.caught_block_pieces.clone();
+        let caught_piece_responses = self.caught_piece_responses.clone();
         let downloaded = self.downloaded;
 
         // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
@@ -204,27 +204,27 @@ impl ConnectedPeer {
                         break;
                     }
 
-                    let mut block_pieces_guard = caught_block_pieces.lock().await;
-                    let mut block_pieces: Vec<BlockPiece> = block_pieces_guard.iter()
+                    let mut piece_responses_guard = caught_piece_responses.lock().await;
+                    let mut piece_response: Vec<PieceResponse> = piece_responses_guard.iter()
                                                                               .filter(|bp| bp.index == accepted_piece_req.piece_index)
                                                                               .cloned()
                                                                               .collect();
 
-                    let current_length: u32 = block_pieces.iter().map(|bp| bp.block.len() as u32).sum();
+                    let current_length: u32 = piece_response.iter().map(|bp| bp.block.len() as u32).sum();
                     if current_length >= accepted_piece_req.piece_length {
-                        block_pieces.sort();
+                        piece_response.sort();
 
-                        let piece_data: Vec<u8> = block_pieces.iter().flat_map(|piece| piece.block.iter()).copied().collect();
+                        let piece_data: Vec<u8> = piece_response.iter().flat_map(|piece| piece.block.iter()).copied().collect();
                         let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
                         
                         if piece_hash == accepted_piece_req.piece_hash {
                             let _ = downloaded.send(PieceDownloaded { piece_data, piece_req: accepted_piece_req }).await;
-                            block_pieces_guard.retain(|bp| !block_pieces.contains(&bp));
+                            piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
                             break;
                         }
                     }
                     
-                    drop(block_pieces_guard);
+                    drop(piece_responses_guard);
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 };
             }

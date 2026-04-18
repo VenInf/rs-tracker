@@ -24,7 +24,7 @@ pub enum Task {
     Response(PieceResponse),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PieceResponse {
     pub index: u32,
     pub begin: u32,
@@ -119,8 +119,8 @@ impl Pieces {
         
         let mut pieces_vec = vec![]; 
 
-        for hash in info.pieces.clone() {
-            let piece = Piece { piece_hash: hash, piece_data: None};
+        for piece_hash in info.piece_hashes.clone() {
+            let piece = Piece { piece_hash, piece_data: None};
             pieces_vec.push(piece);
         }
         
@@ -131,25 +131,5 @@ impl Pieces {
         self.pieces_vec.iter().map(|p| p.piece_data.is_some() as u8).collect()
     }
 
-    pub fn write_to_disk(&self, filename: &str) -> Result<(), Error> {
-        println!("Attempt to write to disc");
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(filename)?;
-
-        file.set_len(self.length as u64)?;
-
-        for (idx, piece) in self.pieces_vec.iter().enumerate() {
-            let offset = (idx as u64) * (self.piece_length as u64);
-            file.seek(SeekFrom::Start(offset))?;
-            
-            let Some(piece_data) = &piece.piece_data else { continue; };
-            file.write_all(piece_data.as_slice())?;
-        }
-
-        Ok(())
-    }    
 }
 
