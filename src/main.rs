@@ -14,7 +14,7 @@ use tokio::time::timeout;
 use rand::seq::IndexedRandom;
 use tokio::sync::{Mutex, mpsc};
 use crate::peer::TorrentTcpMessage;
-use crate::pieces::{Bitfield, PieceTask, SharedDownloads};
+use crate::pieces::{Bitfield, SharedDownloads, Task};
 use tokio::sync::RwLock;
 
 #[derive(clap::Parser)]
@@ -68,9 +68,10 @@ async fn main() -> Result<(), Error> {
     // create a tasks pool
 
     let total_pieces_length = torrent_file.info.file_data.total_length();
-    let task_channels: Vec<(mpsc::Sender<PieceTask>, mpsc::Receiver<PieceTask>)> = (0..announce_response.peers.len())
+    let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..announce_response.peers.len())
         .map(|_| mpsc::channel(64))
         .collect();
+    
     let (downloaded_sender, downloaded_receiver) = mpsc::channel(total_pieces_length as usize);
 
     let mut connected_peers = vec![];
@@ -81,16 +82,16 @@ async fn main() -> Result<(), Error> {
         pieces: RwLock::new(vec![]),
     });
 
-    for (&peer_address, (task_sender, task_receiver)) in announce_response.peers.iter().zip(task_channels) {
+    for (peer_address, (task_sender, task_receiver)) in announce_response.peers.iter().zip(task_channels) {
         let peer = peer::ConnectedPeer::new(
-                    peer_address,
+                    peer_address.clone(),
                     torrent_file.info_hash,
                     my_peer_id.clone(),
                     total_pieces_length,
-                    task_sender,
+                    task_sender.clone(),
                     task_receiver,
-                    downloaded_sender,
-                    shared_downloads
+                    downloaded_sender.clone(),
+                    shared_downloads.clone()
                     ).await;
         
         match peer {
@@ -105,13 +106,8 @@ async fn main() -> Result<(), Error> {
 
     // Send tasks, etc
 
-    let mut pieces = pieces::Pieces::new(&torrent_file.info)?;
-    
-    for (idx, piece) in pieces.pieces_vec.iter_mut().enumerate() {
-        piece.download_from(&mut connected_peer, pieces.piece_length, idx as u32).await?
-    }    
 
-    pieces.write_to_disk(torrent_file.comment.unwrap_or("no-name"))?;
+
 
     Ok(())
 }
