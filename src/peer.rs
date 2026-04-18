@@ -4,10 +4,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use winnow::Parser;
 use std::io::{Error, ErrorKind};
-use std::iter;
-use crate::{handshake, pieces};
+use crate::{handshake};
 use crate::pieces::{PieceDownloaded, PieceTask};
 use sha1::{Digest, Sha1};
 use futures_util::{StreamExt, SinkExt};
@@ -21,11 +19,12 @@ pub struct BlockPiece {
     block: Vec<u8>
 }
 
+// TODO: Controller shouldn't think that a task is completed untill it receives a DownloadedTask!
+
 pub struct ConnectedPeer {
     pub framed_stream:  Framed<TcpStream, LengthDelimitedCodec>,
     tasks: mpsc::Receiver<PieceTask>,
     pub downloaded: mpsc::Sender<PieceDownloaded>,
-    // TODO: Controller shouldn't think that a task is completed untill it receives a DownloadedTask!
     pub choked: Arc<AtomicBool>,
     pub caught_block_pieces: Arc<Mutex<Vec<BlockPiece>>>,
     pub peer_id: [u8; 20],
@@ -152,8 +151,8 @@ impl ConnectedPeer {
                 }
 
                 if let Some(task) = tasks.recv().await {
-                    send_download_pieces(&mut sink, &task).await;
-                    accepted_tasks_sender.send(task).await;
+                    let _ = send_download_pieces(&mut sink, &task).await;
+                    let _ = accepted_tasks_sender.send(task).await;
                 }
             }
         });
@@ -161,7 +160,6 @@ impl ConnectedPeer {
 
         let caught_block_pieces = self.caught_block_pieces.clone();
         let downloaded = self.downloaded;
-
 
         // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
         tokio::spawn(async move {
@@ -187,7 +185,7 @@ impl ConnectedPeer {
                         let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
                         
                         if piece_hash == accepted_task.piece_hash {
-                            downloaded.send(PieceDownloaded { piece_data, piece_task: accepted_task });
+                            let _ = downloaded.send(PieceDownloaded { piece_data, piece_task: accepted_task }).await;
                             block_pieces_guard.retain(|bp| !block_pieces.contains(&bp));
                             break;
                         }

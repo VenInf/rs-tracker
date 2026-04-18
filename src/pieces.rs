@@ -25,7 +25,7 @@ pub struct PieceTask {
     pub piece_length: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PieceDownloaded {
     pub piece_data: Vec<u8>,
     pub piece_task: PieceTask
