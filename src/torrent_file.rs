@@ -39,6 +39,15 @@ pub struct File<'a> {
     pub path: Vec<&'a str>,
 }
 
+impl<'a> FileData<'a> {
+    pub fn total_length(self) -> u64 {
+        match self {
+            FileData::Single { length } => length as u64,
+            FileData::Multi { files } => files.iter().map(|file| file.length as u64).sum() 
+        }
+    } 
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversionError {
     pub failed_to_find: String,

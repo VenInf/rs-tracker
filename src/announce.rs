@@ -18,7 +18,7 @@ pub async fn announce_to_tracker<'a>(
             std::str::from_utf8_unchecked(&torrent_file.info_hash)
         })
         .append_pair("port", &port.to_string())
-        .append_pair("uploaded", "0")
+        .append_pair("uploaded", "0") // TODO: dynamic the uploaded/downloaded numbers
         .append_pair("downloaded", "0")
         .append_pair("left", &torrent_file.left_initial.to_string())
         .append_pair("compact", "1")

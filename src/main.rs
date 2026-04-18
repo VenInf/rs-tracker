@@ -5,14 +5,17 @@ mod handshake;
 mod peer;
 mod pieces;
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::path::PathBuf;
 use tokio::time::timeout;
 use rand::seq::IndexedRandom;
-
+use tokio::sync::{Mutex, mpsc};
 use crate::peer::TorrentTcpMessage;
+use crate::pieces::{Bitfield, PieceTask, SharedDownloads};
+use tokio::sync::RwLock;
 
 #[derive(clap::Parser)]
 #[command(author, version, about = "torrent tracker")]
@@ -59,41 +62,48 @@ async fn main() -> Result<(), Error> {
 
     let announce_response = announce::parse_announce_response(announce_ast).map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
     println!("{:?}", announce_response);
-    
 
-    let peer_address = announce_response.peers.choose(&mut rand::rng()).ok_or(Error::new(ErrorKind::InvalidData, "No first peer to select"))?;
-    let peer_address = ("86.250.192.168".to_string(), 51523);
-    let mut connected_peer = peer::ConnectedPeer::new(peer_address.clone(), torrent_file.info_hash, my_peer_id.clone()).await?;
-    
-    let mut bitfield = vec![];
-    let mut chocked = true;
 
-    println!("DEBUG: Waiting for a bitfield");
-    let init_response = timeout(Duration::from_secs(10), connected_peer.read_message()).await?.ok();
-    if let Some(TorrentTcpMessage::Bitfield(bf)) = init_response {
-        println!("DEBUG: Caught bitfield: {:?}", bf);
-        bitfield = bf;
-    } else if let Some(TorrentTcpMessage::Unchoke) = init_response {
-        println!("DEBUG: Caught unchocke message");
-        chocked = false;
-    } else {
-        println!("DEBUG: No intial message sent");
+    // TODO:
+    // create a tasks pool
+
+    let total_pieces_length = torrent_file.info.file_data.total_length();
+    let task_channels: Vec<(mpsc::Sender<PieceTask>, mpsc::Receiver<PieceTask>)> = (0..announce_response.peers.len())
+        .map(|_| mpsc::channel(64))
+        .collect();
+    let (downloaded_sender, downloaded_receiver) = mpsc::channel(total_pieces_length as usize);
+
+    let mut connected_peers = vec![];
+    let mut task_senders = vec![];
+
+    let shared_downloads = Arc::new(SharedDownloads {
+        bitfield: RwLock::new(Bitfield::new(total_pieces_length)),
+        pieces: RwLock::new(vec![]),
+    });
+
+    for (&peer_address, (task_sender, task_receiver)) in announce_response.peers.iter().zip(task_channels) {
+        let peer = peer::ConnectedPeer::new(
+                    peer_address,
+                    torrent_file.info_hash,
+                    my_peer_id.clone(),
+                    total_pieces_length,
+                    task_sender,
+                    task_receiver,
+                    downloaded_sender,
+                    shared_downloads
+                    ).await;
+        
+        match peer {
+            Ok(connected_peer) => {
+                connected_peers.push(connected_peer);
+                task_senders.push(task_sender);
+
+            }
+            Err(e) => { println!("Connection to {:?} peer failed with {}", peer_address, e); }
+        }
     }
 
-    let interested_message = TorrentTcpMessage::Interested;            
-    connected_peer.send_message(interested_message).await?;
-
-    let unchoke_response = timeout(Duration::from_secs(10), connected_peer.read_message()).await?.ok();
-    if let Some(TorrentTcpMessage::Unchoke) = unchoke_response {
-        println!("DEBUG: Caught unchocke message");
-        chocked = false;
-    } else {
-        println!("DEBUG: No response on interested message sent");
-    }
-
-    if chocked {
-        return Err(Error::new(ErrorKind::ConnectionRefused, format!("Failed to unchoke")));
-    }
+    // Send tasks, etc
 
     let mut pieces = pieces::Pieces::new(&torrent_file.info)?;
     
