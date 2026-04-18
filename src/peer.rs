@@ -1,16 +1,25 @@
 use futures_util::stream::{SplitSink, SplitStream};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use winnow::Parser;
 use std::io::{Error, ErrorKind};
-use crate::handshake;
+use std::iter;
+use crate::{handshake, pieces};
 use crate::pieces::{PieceDownloaded, PieceTask};
 use sha1::{Digest, Sha1};
 use futures_util::{StreamExt, SinkExt};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc};
+
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone)]
+pub struct BlockPiece {
+    index: u32,
+    begin: u32,
+    block: Vec<u8>
+}
 
 pub struct ConnectedPeer {
     pub framed_stream:  Framed<TcpStream, LengthDelimitedCodec>,
@@ -18,6 +27,7 @@ pub struct ConnectedPeer {
     pub downloaded: mpsc::Sender<PieceDownloaded>,
     // TODO: Controller shouldn't think that a task is completed untill it receives a DownloadedTask!
     pub choked: Arc<AtomicBool>,
+    pub caught_block_pieces: Arc<Mutex<Vec<BlockPiece>>>,
     pub peer_id: [u8; 20],
 }
 
@@ -60,7 +70,8 @@ impl ConnectedPeer {
         tasks: mpsc::Receiver<PieceTask>,
         downloaded: mpsc::Sender<PieceDownloaded>,
         ) -> Result<Self, Error> {
-        
+        // TODO: add the catch for the bitfield, send ours
+
         let addr = format!("{}:{}", address.0, address.1);
         println!("Attemt to connect at {}", addr);
         let mut stream = TcpStream::connect(addr).await?;
@@ -79,10 +90,11 @@ impl ConnectedPeer {
         }
 
         let framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
-        
+
         Ok(Self {
             framed_stream,
             choked: AtomicBool::new(true).into(),
+            caught_block_pieces: Arc::new(Mutex::new(vec![])),        
             peer_id: response_handshake.peer_id,
             tasks,
             downloaded,
@@ -92,10 +104,10 @@ impl ConnectedPeer {
 
     pub async fn interact_loop(self) -> Result<(), Error> {
         let (mut sink, mut stream) = self.framed_stream.split();
-        let mut block_pieces: Vec<(u32, u32, Vec<u8>)> = vec![];
-        let (accepted_tasks_sender, accepted_tasks_receiver) = mpsc::channel(5);
-
+        let (accepted_tasks_sender, mut accepted_tasks_receiver) = mpsc::channel(5);
+        
         let choked = self.choked.clone();
+        let caught_block_pieces = self.caught_block_pieces.clone();
 
         // Listener, also responses to peer requests
         tokio::spawn(async move {
@@ -111,7 +123,12 @@ impl ConnectedPeer {
                         continue;
                     }
                     TorrentTcpMessage::Piece { index, begin, block } => {
-                        block_pieces.push((index, begin, block));
+                        let mut pieces = caught_block_pieces.lock().await;
+                        let bp = BlockPiece { index, begin, block };
+                        // No duplicates stored
+                        if !pieces.contains(&bp) {
+                            pieces.push(bp);
+                        }
                     } 
                     TorrentTcpMessage::Request { index, begin, length } => {
                         // TODO: send back a packet of local data
@@ -142,74 +159,47 @@ impl ConnectedPeer {
         });
         
 
-        // TODO: Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
+        let caught_block_pieces = self.caught_block_pieces.clone();
+        let downloaded = self.downloaded;
+
+
+        // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
         tokio::spawn(async move {
-            loop {
-                // TODO: Get hashes that block should be collected in, otherwise discard blocks
-                let res =  block_pieces;
+            while let Some(accepted_task) = accepted_tasks_receiver.recv().await {
+                let timer = tokio::time::Instant::now();
+                loop {
+                    if timer.elapsed() > tokio::time::Duration::from_secs(60) {
+                        // Max time per block
+                        break;
+                    }
 
-                // if choked.load(Ordering::Relaxed) {
-                //     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                //     continue; 
-                // }
+                    let mut block_pieces_guard = caught_block_pieces.lock().await;
+                    let mut block_pieces: Vec<BlockPiece> = block_pieces_guard.iter()
+                                                                              .filter(|bp| bp.index == accepted_task.piece_index)
+                                                                              .cloned()
+                                                                              .collect();
 
+                    let current_length: u32 = block_pieces.iter().map(|bp| bp.block.len() as u32).sum();
+                    if current_length >= accepted_task.piece_length {
+                        block_pieces.sort();
+
+                        let piece_data: Vec<u8> = block_pieces.iter().flat_map(|piece| piece.block.iter()).copied().collect();
+                        let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
+                        
+                        if piece_hash == accepted_task.piece_hash {
+                            downloaded.send(PieceDownloaded { piece_data, piece_task: accepted_task });
+                            block_pieces_guard.retain(|bp| !block_pieces.contains(&bp));
+                            break;
+                        }
+                    }
+                    
+                    drop(block_pieces_guard);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                };
             }
         });
         return Ok(());
     }
-
-
-    // TODO: remove when not needed as reference
-    pub async fn download_piece(&mut self, task: PieceTask) -> Result<PieceDownloaded, Error> {
-        let block_size = 16384;
-        let mut piece_data = vec![0u8; task.piece_length as usize];
-        
-        for offset in (0..task.piece_length).step_by(block_size as usize) {
-            let length = std::cmp::min(block_size, task.piece_length - offset);
-            let req_message = TorrentTcpMessage::Request { index: task.piece_index, begin: offset, length };            
-
-            self.send_message(req_message).await?;            
-            let response = self.read_message().await?;
-
-            loop {
-                match response {
-                    // TODO: handle the sending of the data as well
-                    TorrentTcpMessage::KeepAlive => continue,
-                    TorrentTcpMessage::Choke => {
-                        self.choked = true;
-                        break;
-                    }
-                    TorrentTcpMessage::Piece { index, begin, block } => {
-                        if index != task.piece_index {
-                            return Err(Error::new(ErrorKind::InvalidData, "Received block for wrong piece"));
-                        }
-
-                        println!("DEBUG: Caught a piece with index: {}, begin: {}", index, begin);
-                        
-                        let start = begin as usize;
-                        let end = start + block.len();
-                        
-                        if end <= piece_data.len() {
-                            piece_data[start..end].copy_from_slice(&block);
-                        } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Block exceeds piece length"));
-                        }
-                        break;
-                    }
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unexpected TorrentTcpMessage received"))
-                }
-
-            }
-        }
-
-        let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
-        
-        if task.piece_hash == piece_hash {
-            return Ok(PieceDownloaded {piece_data, piece_task: task});
-        } else {
-            return Err(Error::new(ErrorKind::InvalidData, "Failed to verify the received block hash"));
-        }
-    }    
 }
 
 pub enum TorrentTcpMessage {
