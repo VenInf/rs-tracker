@@ -4,22 +4,15 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::fmt;
 use std::io::{Error, ErrorKind};
+use tokio::time::{timeout, Duration};
 use crate::{handshake};
 use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, PieceResponse, SharedDownloads, Task};
 use sha1::{Digest, Sha1};
 use futures_util::{StreamExt, SinkExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc};
-
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone)]
-pub struct BlockPiece {
-    index: u32,
-    begin: u32,
-    block: Vec<u8>
-}
-
-// TODO: Controller shouldn't think that a task is completed untill it receives a DownloadedTask!
 
 pub struct ConnectedPeer {
     pub peer_id: [u8; 20],
@@ -38,7 +31,10 @@ pub async fn read_message(stream: &mut SplitStream<Framed<TcpStream, LengthDelim
         let raw_message = frame?;
 
         if let Some((id, payload)) = raw_message.split_first() {
-            return TorrentTcpMessage::parse(id, payload);
+            if let Ok(message) = TorrentTcpMessage::parse(id, payload) {
+                println!("Reading message {}", message);
+            }
+            return TorrentTcpMessage::parse(id, payload); 
         } else {
             return Ok(TorrentTcpMessage::KeepAlive);
         }
@@ -48,6 +44,8 @@ pub async fn read_message(stream: &mut SplitStream<Framed<TcpStream, LengthDelim
 }
 
 pub async fn send_message(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, message: TorrentTcpMessage) -> Result<(), Error> {    
+    println!("Sending message {}", message);
+
     sink.send(message.serialize().into()).await?;      
     Ok(())
 }
@@ -119,12 +117,20 @@ impl ConnectedPeer {
         // Check that the order is correct
         let bitfield = self.shared_downloads.bitfield.read().await.clone();
         let _ = send_message(&mut sink, TorrentTcpMessage::Bitfield(bitfield.bytes)).await;
-        let _ = send_message(&mut sink, TorrentTcpMessage::Interested).await;
         let _ = send_message(&mut sink, TorrentTcpMessage::Unchoke).await;
+        let _ = send_message(&mut sink, TorrentTcpMessage::Interested).await;
 
         // Listener, also responses to peer requests
         tokio::spawn(async move {
-            while let Ok(response) = read_message(&mut stream).await {
+            loop {
+                let inactivity_time = Duration::from_secs(5);
+                println!("DEBUG BEFORE");
+                let message_result = timeout(inactivity_time, read_message(&mut stream)).await;
+                println!("DEBUG MIDDLE");
+
+                let response: TorrentTcpMessage = message_result??;
+                println!("DEBUG AFTER");
+
                 match response {
                     TorrentTcpMessage::KeepAlive => continue,
                     TorrentTcpMessage::Bitfield(raw_bitfield) => {
@@ -132,14 +138,15 @@ impl ConnectedPeer {
                         peer_bitfield.set_all(raw_bitfield);
                     }
                     TorrentTcpMessage::Choke => {
+                        println!("Caught Choke from {}", String::from_utf8_lossy(&self.peer_id));
                         choked.store(true, Ordering::Relaxed);
-                        continue;
                     }
                     TorrentTcpMessage::Unchoke => {
+                        println!("Caught Unchoke from {}", String::from_utf8_lossy(&self.peer_id));
                         choked.store(false, Ordering::Relaxed);
-                        continue;
                     }
                     TorrentTcpMessage::Piece { index, begin, block } => {
+                        println!("Caught Piece from {}", String::from_utf8_lossy(&self.peer_id));
                         let mut pieces = caught_piece_responses.lock().await;
                         let pr = PieceResponse { index, begin, block };
                         // No duplicates stored
@@ -148,6 +155,7 @@ impl ConnectedPeer {
                         }
                     } 
                     TorrentTcpMessage::Request { index, begin, length } => {
+                        println!("Caught Request from {}", String::from_utf8_lossy(&self.peer_id));
                         if let Some(block) = self.shared_downloads.get_block(index, begin, length).await {
                             let response_task = Task::Response(PieceResponse { index, begin, block });
                             let _ = self.tasks_sender.send(response_task).await;
@@ -155,9 +163,8 @@ impl ConnectedPeer {
                     }
                     _ => return Err(Error::new(ErrorKind::InvalidData, "Unexpected TorrentTcpMessage received"))
                 }
-            }
-            
-            return Ok(());
+            };
+            Ok(())
         });
         
         let choked = self.choked.clone();
@@ -172,6 +179,8 @@ impl ConnectedPeer {
                 }
 
                 if let Some(task) = tasks_receiver.recv().await {
+                    println!("Received task {:?}", task);
+
                     match task {
                         Task::Request(piece_req) => {
                             let peer_bitfield = self.peer_bitfield.lock().await;
@@ -233,6 +242,7 @@ impl ConnectedPeer {
     }
 }
 
+#[derive(Debug)]
 pub enum TorrentTcpMessage {
     KeepAlive,
     Choke,
@@ -244,6 +254,23 @@ pub enum TorrentTcpMessage {
     Request { index: u32, begin: u32, length: u32 },
     Piece { index: u32, begin: u32, block: Vec<u8> },
     Cancel { index: u32, begin: u32, length: u32 },
+}
+
+impl fmt::Display for TorrentTcpMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TorrentTcpMessage::KeepAlive => write!(f, "KeepAlive"),
+            TorrentTcpMessage::Choke => write!(f, "Choke"),
+            TorrentTcpMessage::Unchoke => write!(f, "Unchoke"),
+            TorrentTcpMessage::Interested => write!(f, "Interested"),
+            TorrentTcpMessage::NotInterested => write!(f, "NotInterested"),
+            TorrentTcpMessage::Have(_) => write!(f, "Have"),
+            TorrentTcpMessage::Bitfield(_) => write!(f, "Bitfield"),
+            TorrentTcpMessage::Piece {..} => write!(f, "Piece"),
+            TorrentTcpMessage::Request {..} => write!(f, "Request"),
+            TorrentTcpMessage::Cancel {..} => write!(f, "Cancel"),
+        }
+    }
 }
 
 impl TorrentTcpMessage {

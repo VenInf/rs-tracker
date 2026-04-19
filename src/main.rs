@@ -10,13 +10,10 @@ use std::time::Duration;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use tokio::task::JoinSet;
 use tokio::time::timeout;
 use rand::seq::IndexedRandom;
 use tokio::sync::{Mutex, mpsc};
-use crate::peer::TorrentTcpMessage;
-use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, PieceResponse, SharedDownloads, Task};
-use crate::torrent_file::FileData;
+use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, SharedDownloads, Task};
 use tokio::sync::RwLock;
 use std::fs::OpenOptions;
 
@@ -65,7 +62,6 @@ async fn main() -> Result<(), Error> {
     println!("Torrent AST: {}", torrent_ast);
 
     let torrent_file = torrent_file::bentree_to_torrent_file(&torrent_ast).map_err(|_| Error::new(ErrorKind::InvalidInput, "Failed to get torrent file from ast"))?;
-    println!("Torrent File: {:?}", &torrent_file);
 
     let Some(announce_url) = &torrent_file.announce else {
         return Err(Error::new(ErrorKind::InvalidData, "No announce-url"));
@@ -114,8 +110,9 @@ async fn main() -> Result<(), Error> {
 
     let total_pieces_length = torrent_file.info.file_data.total_length();
 
-    let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..announce_response.peers.len())
-        .map(|_| mpsc::channel(64))
+    let peers = vec![("198.54.128.139".to_string(), 5564)];
+    let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
+        .map(|_| mpsc::channel(4))
         .collect();
 
     let (downloaded_sender, mut downloaded_receiver) = mpsc::channel(total_pieces_length as usize);
@@ -128,8 +125,8 @@ async fn main() -> Result<(), Error> {
         pieces: RwLock::new(vec![]),
     });
 
-    for (peer_address, (task_sender, task_receiver)) in announce_response.peers.iter().zip(task_channels) {
-        let peer = peer::ConnectedPeer::new(
+    for (peer_address, (task_sender, task_receiver)) in peers.iter().zip(task_channels) {
+        let peer_part = peer::ConnectedPeer::new(
                     peer_address.clone(),
                     torrent_file.info_hash,
                     my_peer_id.clone(),
@@ -138,15 +135,17 @@ async fn main() -> Result<(), Error> {
                     task_receiver,
                     downloaded_sender.clone(),
                     shared_downloads.clone()
-                    ).await;
-        
+                    );
+        let peer = timeout(Duration::from_secs(1), peer_part).await;
+
         match peer {
-            Ok(connected_peer) => {
+            Ok(Ok(connected_peer)) => {
                 connected_peers.push(connected_peer);
                 task_senders.push(task_sender);
 
             }
-            Err(e) => { println!("Connection to {:?} peer failed with {}", peer_address, e); }
+            Ok(Err(e)) => { println!("Connection to {} peer failed with {}", peer_address.0, e); }
+            Err(e) => { println!("Connection to {} peer failed with {}", peer_address.0, e); }
         }
     }
 
@@ -165,40 +164,72 @@ async fn main() -> Result<(), Error> {
     // Thread that sends out the tasks to the peers
     let downloaded = downloaded_arc.clone();
     tokio::spawn(async move {
-        // Remove downloaded requests
-        let downloaded = downloaded.lock().await.clone();
-        piece_requests.lock().await.retain(|req| !downloaded.iter().any(|d| &d.piece_req == req));
+        loop {
+            println!("In the task sending thread");
+                    
+            // Remove downloaded requests
+            let current_downloaded = downloaded.lock().await.clone();
+            println!("current_downloaded.len() {}", current_downloaded.len());
 
-        // Send out requests
-        for piece_req in piece_requests.lock().await.iter() {
-            for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
-                let bf = peer_bitfield.lock().await.clone();
-                if bf.has(piece_req.piece_index) {
-                    let _ = task_senders[peer_index].send(Task::Request(piece_req.clone())).await;
-                };
+            let mut piece_requests_guard = piece_requests.lock().await;
+            piece_requests_guard.retain(|req| !current_downloaded.iter().any(|d| &d.piece_req == req));
+            let current_piece_requests = piece_requests_guard.clone();
+            drop(piece_requests_guard);
+
+
+            // Send out requests
+            for piece_req in current_piece_requests.iter() {
+
+                println!("Attempt to send request {:?}", piece_req);
+
+                for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
+                    if peer_bitfield.lock().await.is_empty() {
+                        continue;
+                    }
+
+                    println!("Checking peer_index {}", peer_index);
+
+                    let has_piece = {
+                        let bf = peer_bitfield.lock().await;
+                        bf.has(piece_req.piece_index)
+                    };                    
+
+                    if has_piece {
+                        println!("Sending request to peer_index {}", peer_index);
+                        let _ = task_senders[peer_index]
+                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(500)) // TODO: better solution?
+                                .await;
+                    };
+                }
             }
-        }
 
-        if downloaded.len() as u64 == total_pieces_length {
-            // TODO: write to a file
-            let file_name = torrent_file.info.name.clone();
-            write_to_disk(downloaded, file_name);
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     });
 
     let downloaded = downloaded_arc.clone();
     // Thread that collects the downloads and removes them from the tasks
     tokio::spawn(async move {
        while let Some(d) = downloaded_receiver.recv().await {
-            let mut shared_downloads_write = shared_downloads.bitfield.write().await;
-            shared_downloads_write.set(d.piece_req.piece_index);
+            println!("Received downloaded piece index: {}", d.piece_req.piece_index);
+            shared_downloads.bitfield.write().await.set(d.piece_req.piece_index);
             // TODO: send the have messages
 
             downloaded.lock().await.push(d);
        }
     });
 
-    Ok(())
+    let downloaded = downloaded_arc.clone();
+
+    loop {
+        let downloaded_len = downloaded.lock().await.len();
+        if downloaded_len as u64 == total_pieces_length {
+            let file_name = torrent_file.info.name.clone();
+            let mut downloaded_guard = downloaded.lock().await;
+            let downloaded_data = std::mem::take(&mut *downloaded_guard);
+
+            let _ = write_to_disk(downloaded_data, file_name);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    }
 }

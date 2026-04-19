@@ -1,22 +1,8 @@
-use std::{io::{Error, ErrorKind}};
+use std::{fmt, io::{Error, ErrorKind}};
 use sha1::{Digest, Sha1};
-use std::fs::OpenOptions;
 use std::io::{Write, Seek, SeekFrom};
 use tokio::sync::RwLock;
 use crate::{peer::{ConnectedPeer, TorrentTcpMessage}, torrent_file::{FileData, TorrentInfo}};
-
-#[derive(Debug, Clone)]
-pub struct Pieces {
-    pub pieces_vec: Vec<Piece>,
-    pub piece_length: u32,
-    pub length: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct Piece {
-    pub piece_hash: [u8; 20],
-    pub piece_data: Option<Vec<u8>>
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
@@ -78,10 +64,32 @@ pub struct Bitfield {
 impl Bitfield {
     pub fn new(total_pieces_length: u64) -> Self {
         Self { bytes: vec![0; total_pieces_length.div_ceil(8) as usize] }
+ 
     }
 }
+impl std::fmt::Display for Bitfield {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Take up to 4 bytes (32 pieces)
+        let display_limit = 4.min(self.bytes.len());
+        let mut bits = String::new();
 
+        for i in 0..display_limit {
+            bits.push_str(&format!("{:08b}", self.bytes[i]));
+            if i < display_limit - 1 { bits.push(' '); }
+        }
+
+        if self.bytes.len() > 4 {
+            bits.push_str("...");
+        }
+
+        write!(f, "[{}]", bits)
+    }
+}
 impl Bitfield {
+    pub fn is_empty(&self) -> bool {
+        self.bytes.iter().fold(0, |acc, x| acc | *x) == 0
+    }
+
     pub fn has(&self, piece_index: u32) -> bool {
         let byte_index = piece_index / 8;
         let bit_offset = piece_index % 8;
@@ -89,7 +97,7 @@ impl Bitfield {
         if let Some(byte) = self.bytes.get(byte_index as usize) {
             // BitTorrent bit order: index 0 is the most significant bit (128)
             let mask = 0b1000_0000 >> bit_offset;
-            *byte == mask
+            byte & mask != 0
         } else {
             false
         }
@@ -108,28 +116,5 @@ impl Bitfield {
     pub fn set_all(&mut self, bytes: Vec<u8>) {
         self.bytes = bytes;
     }
-}
-
-// TODO: remove when will be not needed
-impl Pieces {
-    pub fn new(info: &TorrentInfo) -> Result<Self, Error> {
-        let FileData::Single { length } = info.file_data else {
-            return Err(Error::new(ErrorKind::InvalidInput, "Multifile torrent is not supported"));
-        };
-        
-        let mut pieces_vec = vec![]; 
-
-        for piece_hash in info.piece_hashes.clone() {
-            let piece = Piece { piece_hash, piece_data: None};
-            pieces_vec.push(piece);
-        }
-        
-        Ok(Pieces { pieces_vec, piece_length: info.piece_length as u32, length: length as u32})
-    }
-
-    pub fn bitfield(self) -> Vec<u8> {
-        self.pieces_vec.iter().map(|p| p.piece_data.is_some() as u8).collect()
-    }
-
 }
 
