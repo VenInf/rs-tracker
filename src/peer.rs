@@ -1,6 +1,6 @@
 use futures_util::stream::{SplitSink, SplitStream};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,56 +11,19 @@ use crate::{handshake};
 use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, PieceResponse, SharedDownloads, Task};
 use sha1::{Digest, Sha1};
 use futures_util::{StreamExt, SinkExt};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc};
 
 pub struct ConnectedPeer {
     pub peer_id: [u8; 20],
     framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
-    choked: Arc<AtomicBool>,
     pub peer_bitfield: Arc<Mutex<Bitfield>>,
+    caught_piece_responses: Arc<Mutex<Vec<PieceResponse>>>,
+    choked_sender: watch::Sender<bool>,
+    choked_receiver: watch::Receiver<bool>,
     tasks_sender: mpsc::Sender<Task>,
     tasks_receiver: mpsc::Receiver<Task>,
-    pub downloaded: mpsc::Sender<PieceDownloaded>,
-    caught_piece_responses: Arc<Mutex<Vec<PieceResponse>>>,
     shared_downloads: Arc<SharedDownloads>
 }
-
-pub async fn read_message(stream: &mut SplitStream<Framed<TcpStream, LengthDelimitedCodec>>) -> Result<TorrentTcpMessage, Error> {
-    if let Some(frame) = stream.next().await {
-        let raw_message = frame?;
-
-        if let Some((id, payload)) = raw_message.split_first() {
-            if let Ok(message) = TorrentTcpMessage::parse(id, payload) {
-                println!("Reading message {}", message);
-            }
-            return TorrentTcpMessage::parse(id, payload); 
-        } else {
-            return Ok(TorrentTcpMessage::KeepAlive);
-        }
-    } else {
-        Err(Error::new(ErrorKind::ConnectionAborted, "Peer stopped sending blocks"))
-    }
-}
-
-pub async fn send_message(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, message: TorrentTcpMessage) -> Result<(), Error> {    
-    println!("Sending message {}", message);
-
-    sink.send(message.serialize().into()).await?;      
-    Ok(())
-}
-
-pub async fn send_download_pieces(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, task: &PieceReq) -> Result<(), Error> {
-    let block_size = 16384;
-    
-    for offset in (0..task.piece_length).step_by(block_size as usize) {
-        let length = std::cmp::min(block_size, task.piece_length - offset);
-        let req_message = TorrentTcpMessage::Request { index: task.piece_index, begin: offset, length };            
-        send_message(sink, req_message).await?;
-    }
-
-    Ok(())
-}    
 
 impl ConnectedPeer {
     pub async fn new(
@@ -70,7 +33,6 @@ impl ConnectedPeer {
         total_pieces_length: u64,
         tasks_sender: mpsc::Sender<Task>,
         tasks_receiver: mpsc::Receiver<Task>, // TODO: add Have(piece) to tasks
-        downloaded: mpsc::Sender<PieceDownloaded>,
         shared_downloads: Arc<SharedDownloads>
         ) -> Result<Self, Error> {
         // TODO: send our bitfield as well
@@ -90,46 +52,80 @@ impl ConnectedPeer {
         if response_handshake.info_hash != info_hash {
             return Err(Error::new(ErrorKind::InvalidData, "Wrong handshake hash response"));
         }
-        
+
+        let (choked_sender, choked_receiver) = watch::channel(true);
+        let framed_stream = Framed::new(stream, LengthDelimitedCodec::new()); // We can use `LengthDelimitedCodec` since bittorrent protocol appends the length of the message at the start
+
         Ok(Self {
             peer_id: response_handshake.peer_id,
             peer_bitfield: Arc::new(Mutex::new(Bitfield::new(total_pieces_length))),
-            framed_stream: Framed::new(stream, LengthDelimitedCodec::new()), // We can use `LengthDelimitedCodec` since bittorrent protocol appends the length of the message at the start
-            choked: AtomicBool::new(true).into(),
+            framed_stream,
             caught_piece_responses: Arc::new(Mutex::new(vec![])),
+            choked_sender,
+            choked_receiver,
             tasks_sender,
             tasks_receiver,
-            downloaded,
             shared_downloads
         })
     }
 
+    pub async fn read_message(stream: &mut SplitStream<Framed<TcpStream, LengthDelimitedCodec>>) -> Result<TorrentTcpMessage, Error> {
+        if let Some(frame) = stream.next().await {
+            let raw_message = frame?;
 
-    pub async fn interact_loop(self) -> Result<(), Error> {
+            if let Some((id, payload)) = raw_message.split_first() {
+                if let Ok(message) = TorrentTcpMessage::parse(id, payload) {
+                    println!("Received message {}", message);
+                }
+                return TorrentTcpMessage::parse(id, payload); 
+            } else {
+                return Ok(TorrentTcpMessage::KeepAlive);
+            }
+        } else {
+            Err(Error::new(ErrorKind::ConnectionAborted, "Peer stopped sending blocks"))
+        }
+    }
+
+    pub async fn send_message(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, message: TorrentTcpMessage) -> Result<(), Error> {    
+        let _ = choked_receiver.wait_for(|is_choked| *is_choked == false).await;
+        println!("Sent message {}", message);
+        sink.send(message.serialize().into()).await?;      
+        Ok(())
+    }
+
+    pub async fn send_download_pieces(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, task: &PieceReq) -> Result<(), Error> {
+        let block_size = 16384;
+        
+        for offset in (0..task.piece_length).step_by(block_size as usize) {
+            let length = std::cmp::min(block_size, task.piece_length - offset);
+            let req_message = TorrentTcpMessage::Request { index: task.piece_index, begin: offset, length };            
+            Self::send_message(sink, choked_receiver, req_message).await?;
+        }
+
+        Ok(())
+    }   
+
+    pub async fn interact_loop(mut self) -> Result<(), Error> {
         let (mut sink, mut stream) = self.framed_stream.split();
         let (accepted_piece_req_sender, mut accepted_piece_req_receiver) = mpsc::channel(5);
         
-        let choked = self.choked.clone();
         let peer_bitfield = self.peer_bitfield.clone();
 
         let caught_piece_responses = self.caught_piece_responses.clone();
 
         // Check that the order is correct
-        let bitfield = self.shared_downloads.bitfield.read().await.clone();
-        let _ = send_message(&mut sink, TorrentTcpMessage::Bitfield(bitfield.bytes)).await;
-        let _ = send_message(&mut sink, TorrentTcpMessage::Unchoke).await;
-        let _ = send_message(&mut sink, TorrentTcpMessage::Interested).await;
+        let shared_downloads = self.shared_downloads.clone();
+        let bitfield = shared_downloads.bitfield.read().await.clone();
+        let _ = sink.send(TorrentTcpMessage::Bitfield(bitfield.bytes).serialize().into()).await;
+        let _ = sink.send(TorrentTcpMessage::Interested.serialize().into()).await;
+        let _ = sink.send(TorrentTcpMessage::Unchoke.serialize().into()).await;
 
         // Listener, also responses to peer requests
         tokio::spawn(async move {
             loop {
                 let inactivity_time = Duration::from_secs(5);
-                println!("DEBUG BEFORE");
-                let message_result = timeout(inactivity_time, read_message(&mut stream)).await;
-                println!("DEBUG MIDDLE");
-
+                let message_result = timeout(inactivity_time, Self::read_message(&mut stream)).await;
                 let response: TorrentTcpMessage = message_result??;
-                println!("DEBUG AFTER");
 
                 match response {
                     TorrentTcpMessage::KeepAlive => continue,
@@ -139,11 +135,11 @@ impl ConnectedPeer {
                     }
                     TorrentTcpMessage::Choke => {
                         println!("Caught Choke from {}", String::from_utf8_lossy(&self.peer_id));
-                        choked.store(true, Ordering::Relaxed);
+                        let _ = self.choked_sender.send(true);
                     }
                     TorrentTcpMessage::Unchoke => {
                         println!("Caught Unchoke from {}", String::from_utf8_lossy(&self.peer_id));
-                        choked.store(false, Ordering::Relaxed);
+                        let _ = self.choked_sender.send(false);
                     }
                     TorrentTcpMessage::Piece { index, begin, block } => {
                         println!("Caught Piece from {}", String::from_utf8_lossy(&self.peer_id));
@@ -156,7 +152,7 @@ impl ConnectedPeer {
                     } 
                     TorrentTcpMessage::Request { index, begin, length } => {
                         println!("Caught Request from {}", String::from_utf8_lossy(&self.peer_id));
-                        if let Some(block) = self.shared_downloads.get_block(index, begin, length).await {
+                        if let Some(block) = shared_downloads.get_block(index, begin, length).await {
                             let response_task = Task::Response(PieceResponse { index, begin, block });
                             let _ = self.tasks_sender.send(response_task).await;
                         }
@@ -167,31 +163,23 @@ impl ConnectedPeer {
             Ok(())
         });
         
-        let choked = self.choked.clone();
         let mut tasks_receiver = self.tasks_receiver;
 
         // Sender, for local requests only
         tokio::spawn(async move {
             loop {
-                if choked.load(Ordering::Relaxed) {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    continue; 
-                }
-
                 if let Some(task) = tasks_receiver.recv().await {
-                    println!("Received task {:?}", task);
-
                     match task {
                         Task::Request(piece_req) => {
                             let peer_bitfield = self.peer_bitfield.lock().await;
                             if peer_bitfield.has(piece_req.piece_index) {
-                                let _ = send_download_pieces(&mut sink, &piece_req).await;
+                                let _ = Self::send_download_pieces(&mut sink, &mut self.choked_receiver, &piece_req).await;
                                 let _ = accepted_piece_req_sender.send(piece_req).await;
                             }
                         }
                         Task::Response(PieceResponse { index, begin, block }) => {
                             let resonse_message = TorrentTcpMessage::Piece { index, begin, block };
-                            let _ = send_message(&mut sink, resonse_message).await;
+                            let _ = Self::send_message(&mut sink, &mut self.choked_receiver, resonse_message).await;
                         }
 
                     }
@@ -201,7 +189,7 @@ impl ConnectedPeer {
         
 
         let caught_piece_responses = self.caught_piece_responses.clone();
-        let downloaded = self.downloaded;
+        let shared_downloads = self.shared_downloads.clone();
 
         // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
         tokio::spawn(async move {
@@ -227,7 +215,11 @@ impl ConnectedPeer {
                         let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
                         
                         if piece_hash == accepted_piece_req.piece_hash {
-                            let _ = downloaded.send(PieceDownloaded { piece_data, piece_req: accepted_piece_req }).await;
+                            shared_downloads.bitfield.write().await
+                                                     .set(accepted_piece_req.piece_index);                            
+                            shared_downloads.pieces.write().await
+                                                   .push(PieceDownloaded { piece_data, piece_req: accepted_piece_req });
+
                             piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
                             break;
                         }

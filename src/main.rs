@@ -6,6 +6,7 @@ mod peer;
 mod pieces;
 
 use std::sync::Arc;
+use std::thread::current;
 use std::time::Duration;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -95,35 +96,33 @@ async fn main() -> Result<(), Error> {
         remainder
     };
 
-    let all_requests: Vec<PieceReq> = torrent_file.info.piece_hashes.iter()
-                                                      .enumerate()
-                                                      .map(|(piece_index, piece_hash)|
-                                                        if (piece_index as u32) == total_pieces_length - 1 {
-                                                            PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: last_piece_length}
-                                                        } else {
-                                                            PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: piece_length}
-                                                        })
-                                                       .collect();
+    let all_requests: Vec<PieceReq> = torrent_file.info
+                                                  .piece_hashes.iter()
+                                                  .enumerate()
+                                                  .map(|(piece_index, piece_hash)|
+                                                   if (piece_index as u32) == total_pieces_length - 1 {
+                                                      PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: last_piece_length}
+                                                   } else {
+                                                      PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: piece_length}
+                                                   })
+                                                   .collect();
 
-    let piece_requests: Arc<Mutex<Vec<PieceReq>>> = Arc::new(Mutex::new(all_requests));
-    let downloaded_arc: Arc<Mutex<Vec<PieceDownloaded>>> = Arc::new(Mutex::new(vec![]));
+    let piece_requests_arc: Arc<Mutex<Vec<PieceReq>>> = Arc::new(Mutex::new(all_requests));
 
     let total_pieces_length = torrent_file.info.file_data.total_length();
 
-    let peers = vec![("198.54.128.139".to_string(), 5564)];
+    let peers = &announce_response.peers.clone();
     let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
         .map(|_| mpsc::channel(4))
         .collect();
 
-    let (downloaded_sender, mut downloaded_receiver) = mpsc::channel(total_pieces_length as usize);
+    let shared_downloads_arc = Arc::new(SharedDownloads {
+        bitfield: RwLock::new(Bitfield::new(total_pieces_length)),
+        pieces: RwLock::new(vec![]),
+    }); // Add a way to send the have messages to the tasks
 
     let mut connected_peers = vec![];
     let mut task_senders = vec![];
-
-    let shared_downloads = Arc::new(SharedDownloads {
-        bitfield: RwLock::new(Bitfield::new(total_pieces_length)),
-        pieces: RwLock::new(vec![]),
-    });
 
     for (peer_address, (task_sender, task_receiver)) in peers.iter().zip(task_channels) {
         let peer_part = peer::ConnectedPeer::new(
@@ -133,8 +132,7 @@ async fn main() -> Result<(), Error> {
                     total_pieces_length,
                     task_sender.clone(),
                     task_receiver,
-                    downloaded_sender.clone(),
-                    shared_downloads.clone()
+                    shared_downloads_arc.clone()
                     );
         let peer = timeout(Duration::from_secs(1), peer_part).await;
 
@@ -154,40 +152,39 @@ async fn main() -> Result<(), Error> {
     // Peer threads
     for peer in connected_peers {        
         tokio::spawn(async move {
-            println!("Call interact_loop on peer with id: {:?}", peer.peer_id);
-            if let Err(e) = peer.interact_loop().await {
+            println!("Call interact_loop on peer with id: {:?}", String::from_utf8_lossy(&peer.peer_id));
+            let peer_result = peer.interact_loop().await;
+
+            if let Err(e) = peer_result {
                 eprintln!("Peer connection lost: {}", e);
             }
         });
     }
-
+    
     // Thread that sends out the tasks to the peers
-    let downloaded = downloaded_arc.clone();
+    let shared_downloads = shared_downloads_arc.clone();
     tokio::spawn(async move {
         loop {
             println!("In the task sending thread");
                     
             // Remove downloaded requests
-            let current_downloaded = downloaded.lock().await.clone();
-            println!("current_downloaded.len() {}", current_downloaded.len());
+            let current_bitfield = shared_downloads.bitfield.read().await.clone();
+            println!("current_bitfield.total_set() {}", current_bitfield.total_set());
 
-            let mut piece_requests_guard = piece_requests.lock().await;
-            piece_requests_guard.retain(|req| !current_downloaded.iter().any(|d| &d.piece_req == req));
+            let mut piece_requests_guard = piece_requests_arc.lock().await;
+            piece_requests_guard.retain(|req| !current_bitfield.has(req.piece_index));
             let current_piece_requests = piece_requests_guard.clone();
             drop(piece_requests_guard);
-
 
             // Send out requests
             for piece_req in current_piece_requests.iter() {
 
-                println!("Attempt to send request {:?}", piece_req);
+                println!("Sending request for piece_index: {}", piece_req.piece_index);
 
                 for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
                     if peer_bitfield.lock().await.is_empty() {
                         continue;
                     }
-
-                    println!("Checking peer_index {}", peer_index);
 
                     let has_piece = {
                         let bf = peer_bitfield.lock().await;
@@ -195,10 +192,13 @@ async fn main() -> Result<(), Error> {
                     };                    
 
                     if has_piece {
-                        println!("Sending request to peer_index {}", peer_index);
-                        let _ = task_senders[peer_index]
-                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(500)) // TODO: better solution?
+                        let send_res = task_senders[peer_index]
+                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(10)) // TODO: better solution?
                                 .await;
+
+                        if let Ok(()) = send_res {
+                            println!("Sent to peer with index {}", peer_index);
+                        }
                     };
                 }
             }
@@ -207,28 +207,16 @@ async fn main() -> Result<(), Error> {
         }
     });
 
-    let downloaded = downloaded_arc.clone();
-    // Thread that collects the downloads and removes them from the tasks
-    tokio::spawn(async move {
-       while let Some(d) = downloaded_receiver.recv().await {
-            println!("Received downloaded piece index: {}", d.piece_req.piece_index);
-            shared_downloads.bitfield.write().await.set(d.piece_req.piece_index);
-            // TODO: send the have messages
-
-            downloaded.lock().await.push(d);
-       }
-    });
-
-    let downloaded = downloaded_arc.clone();
-
+    // Thread that writes to disk once there is enough data
+    let shared_downloads = shared_downloads_arc.clone();
     loop {
-        let downloaded_len = downloaded.lock().await.len();
-        if downloaded_len as u64 == total_pieces_length {
-            let file_name = torrent_file.info.name.clone();
-            let mut downloaded_guard = downloaded.lock().await;
-            let downloaded_data = std::mem::take(&mut *downloaded_guard);
+        let bitfield = shared_downloads.bitfield.read().await.clone();
+        println!("Total downloaded pieces: {}", bitfield.total_set());
 
-            let _ = write_to_disk(downloaded_data, file_name);
+        if bitfield.is_full() {
+            let file_name = torrent_file.info.name.clone();
+            let downloaded_pieces = shared_downloads.pieces.read().await.clone();
+            let _ = write_to_disk(downloaded_pieces, file_name);
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }

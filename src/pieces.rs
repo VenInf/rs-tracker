@@ -58,36 +58,26 @@ impl SharedDownloads {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitfield {
-    pub bytes: Vec<u8>,
+    pub bytes: Vec<u8>, // Has to be equal to the total length
 }
 
 impl Bitfield {
     pub fn new(total_pieces_length: u64) -> Self {
         Self { bytes: vec![0; total_pieces_length.div_ceil(8) as usize] }
- 
     }
-}
-impl std::fmt::Display for Bitfield {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Take up to 4 bytes (32 pieces)
-        let display_limit = 4.min(self.bytes.len());
-        let mut bits = String::new();
 
-        for i in 0..display_limit {
-            bits.push_str(&format!("{:08b}", self.bytes[i]));
-            if i < display_limit - 1 { bits.push(' '); }
-        }
-
-        if self.bytes.len() > 4 {
-            bits.push_str("...");
-        }
-
-        write!(f, "[{}]", bits)
-    }
-}
-impl Bitfield {
     pub fn is_empty(&self) -> bool {
         self.bytes.iter().fold(0, |acc, x| acc | *x) == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.bytes.iter().fold(1, |acc, x| acc & *x) == 1
+    }
+
+    pub fn total_set(&self) -> u32 {
+        self.bytes.iter()
+            .map(|&byte| byte.count_ones() as u32)
+            .sum()
     }
 
     pub fn has(&self, piece_index: u32) -> bool {
@@ -115,6 +105,24 @@ impl Bitfield {
 
     pub fn set_all(&mut self, bytes: Vec<u8>) {
         self.bytes = bytes;
-    }
+    }    
 }
 
+impl std::fmt::Display for Bitfield {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Take up to 4 bytes (32 pieces)
+        let display_limit = 4.min(self.bytes.len());
+        let mut bits = String::new();
+
+        for i in 0..display_limit {
+            bits.push_str(&format!("{:08b}", self.bytes[i]));
+            if i < display_limit - 1 { bits.push(' '); }
+        }
+
+        if self.bytes.len() > 4 {
+            bits.push_str("...");
+        }
+
+        write!(f, "[{}]", bits)
+    }
+}
