@@ -86,8 +86,7 @@ async fn main() -> Result<(), Error> {
     let announce_response = announce::parse_announce_response(announce_ast).map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
     println!("{:?}", announce_response);
 
-
-    let total_pieces_length = torrent_file.info.piece_length as u32;
+    let total_amount_of_pieces = torrent_file.info.piece_hashes.len() as u64;
     let piece_length = torrent_file.info.piece_length as u32;
     let remainder = torrent_file.info.piece_hashes.len() as u32 % piece_length;
     let last_piece_length = if remainder == 0 {
@@ -100,7 +99,7 @@ async fn main() -> Result<(), Error> {
                                                   .piece_hashes.iter()
                                                   .enumerate()
                                                   .map(|(piece_index, piece_hash)|
-                                                   if (piece_index as u32) == total_pieces_length - 1 {
+                                                   if (piece_index as u64) == total_amount_of_pieces - 1 {
                                                       PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: last_piece_length}
                                                    } else {
                                                       PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: piece_length}
@@ -109,15 +108,13 @@ async fn main() -> Result<(), Error> {
 
     let piece_requests_arc: Arc<Mutex<Vec<PieceReq>>> = Arc::new(Mutex::new(all_requests));
 
-    let total_pieces_length = torrent_file.info.file_data.total_length();
-
     let peers = &announce_response.peers.clone();
     let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
         .map(|_| mpsc::channel(4))
         .collect();
 
     let shared_downloads_arc = Arc::new(SharedDownloads {
-        bitfield: RwLock::new(Bitfield::new(total_pieces_length)),
+        bitfield: RwLock::new(Bitfield::new(total_amount_of_pieces)),
         pieces: RwLock::new(vec![]),
     }); // Add a way to send the have messages to the tasks
 
@@ -129,7 +126,7 @@ async fn main() -> Result<(), Error> {
                     peer_address.clone(),
                     torrent_file.info_hash,
                     my_peer_id.clone(),
-                    total_pieces_length,
+                    total_amount_of_pieces,
                     task_sender.clone(),
                     task_receiver,
                     shared_downloads_arc.clone()
@@ -178,9 +175,6 @@ async fn main() -> Result<(), Error> {
 
             // Send out requests
             for piece_req in current_piece_requests.iter() {
-
-                println!("Sending request for piece_index: {}", piece_req.piece_index);
-
                 for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
                     if peer_bitfield.lock().await.is_empty() {
                         continue;
@@ -193,11 +187,12 @@ async fn main() -> Result<(), Error> {
 
                     if has_piece {
                         let send_res = task_senders[peer_index]
-                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(10)) // TODO: better solution?
+                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(50)) // TODO: better solution?
                                 .await;
 
                         if let Ok(()) = send_res {
-                            println!("Sent to peer with index {}", peer_index);
+                            println!("Sent request for piece_index: {} to peer_index: {}", piece_req.piece_index, peer_index);
+                            break;
                         }
                     };
                 }
