@@ -28,6 +28,7 @@ struct Cli {
 }
 
 pub fn write_to_disk(pieces_downloaded: Vec<PieceDownloaded>, filename: String) -> Result<(), Error> {
+    // TODO: do the write according to the TorrentFile
     println!("Attempt to write to disc");
 
     let mut file = OpenOptions::new()
@@ -55,7 +56,7 @@ async fn main() -> Result<(), Error> {
             .with(
                 fmt::layer()
                     // .with_thread_ids(true) 
-                    .with_thread_names(true) // This adds the name if you set one
+                    .with_thread_names(true) 
             )
             .with(LevelFilter::INFO)
             .init();
@@ -133,6 +134,7 @@ async fn main() -> Result<(), Error> {
     let mut task_senders = vec![];
 
     for (peer_address, (task_sender, task_receiver)) in peers.iter().zip(task_channels) {
+        // TODO: make this process parallel
         let peer_part = peer::ConnectedPeer::new(
                     peer_address.clone(),
                     torrent_file.info_hash,
@@ -155,7 +157,7 @@ async fn main() -> Result<(), Error> {
         }
     }
 
-    let peer_bitfields: Vec<Arc<Mutex<Bitfield>>> = connected_peers.iter().map(|peer| peer.peer_bitfield.clone()).collect(); 
+    let peer_bitfields: Vec<Arc<Mutex<Bitfield>>> = connected_peers.iter().map(|peer| peer.peer_bitfield_arc.clone()).collect(); 
 
     // Peer threads
     for peer in connected_peers {        
@@ -178,7 +180,6 @@ async fn main() -> Result<(), Error> {
         loop {
             // Remove downloaded requests
             let current_bitfield = shared_downloads.bitfield.read().await.clone();
-            println!("current_bitfield.total_set() {}", current_bitfield.total_set());
 
             let mut piece_requests_guard = piece_requests_arc.lock().await;
             piece_requests_guard.retain(|req| !current_bitfield.has(req.piece_index));
@@ -203,7 +204,9 @@ async fn main() -> Result<(), Error> {
                                 .await;
 
                         if let Ok(()) = send_res {
-                            break;
+                            if !current_bitfield.is_close_to_done() {
+                                break; // Shotgun requests only if we are close to completion 
+                            }
                         }
                     };
                 }
@@ -222,7 +225,8 @@ async fn main() -> Result<(), Error> {
         if bitfield.is_full() {
             let file_name = torrent_file.info.name.clone();
             let downloaded_pieces = shared_downloads.pieces.read().await.clone();
-            let _ = write_to_disk(downloaded_pieces, file_name);
+            write_to_disk(downloaded_pieces, file_name)?;
+            return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }

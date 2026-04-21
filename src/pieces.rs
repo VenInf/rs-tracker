@@ -6,6 +6,8 @@ use crate::{peer::{ConnectedPeer, TorrentTcpMessage}, torrent_file::{FileData, T
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
+    Interested,
+    Have(u32),
     Request(PieceReq),
     Response(PieceResponse),
 }
@@ -58,12 +60,12 @@ impl SharedDownloads {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitfield {
-    pub bytes: Vec<u8>, // Has to be equal to the total length
+    pub bytes: Vec<u8>, // Has to be equal to the amount of pieces
 }
 
 impl Bitfield {
-    pub fn new(total_pieces_length: u64) -> Self {
-        Self { bytes: vec![0; total_pieces_length.div_ceil(8) as usize] }
+    pub fn new(total_pieces_amount: u64) -> Self {
+        Self { bytes: vec![0; total_pieces_amount.div_ceil(8) as usize] }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -72,6 +74,12 @@ impl Bitfield {
 
     pub fn is_full(&self) -> bool {
         self.bytes.iter().fold(1, |acc, x| acc & *x) == 1
+    }
+
+    pub fn is_close_to_done(&self) -> bool {
+        let total_set = self.total_set();
+        let total = 8 * self.bytes.len() as u32;
+        total - total_set <= total.div_ceil(100) 
     }
 
     pub fn total_set(&self) -> u32 {
@@ -95,17 +103,45 @@ impl Bitfield {
 
     pub fn set(&mut self, piece_index: u32) {
         let byte_index = piece_index / 8;
-        let bit_offset = piece_index % 8;
+        let bit_index = piece_index % 8;
 
         if let Some(byte) = self.bytes.get_mut(byte_index as usize) {
-            let mask = 0b1000_0000 >> bit_offset;
+            let mask = 0b1000_0000 >> bit_index;
             *byte |= mask;
         }
     }
 
-    pub fn set_all(&mut self, bytes: Vec<u8>) {
-        self.bytes = bytes;
-    }    
+    pub fn set_all(&mut self, bytes: &Vec<u8>) {
+        self.bytes = bytes.clone();
+    }
+
+    pub fn diff(&self, bitfield: &Bitfield) -> Bitfield {
+        let bytes = self.bytes.iter()
+                      .zip(bitfield.bytes.iter())
+                      .map(|(b1, b2)| b1 & !b2 ) // Set in b1 but not set in b2
+                      .collect();
+        Bitfield { bytes }
+    }
+
+    pub fn get_set_indices(&self) -> Vec<u32> {
+        self.bytes
+            .iter()
+            .enumerate()
+            .flat_map(|(byte_index, &byte)| {
+                if byte == 0 {
+                    return (0..0).collect::<Vec<u32>>();
+                }
+
+                (0..8)
+                    .filter(move |bit_index| {
+                        let mask = 0b1000_0000 >> bit_index;
+                        (byte & mask) != 0
+                    })
+                    .map(move |bit_index| byte_index as u32 * 8 + bit_index)
+                    .collect::<Vec<u32>>()
+            })
+            .collect()
+    }        
 }
 
 impl std::fmt::Display for Bitfield {

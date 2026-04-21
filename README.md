@@ -9,9 +9,9 @@ A small rust torrent tracker, work in progress.
 - [ ] Can download a bittorrent file
     - [x] Can send and receive the announcment
     - [x] Can do a handshake
-    - [ ] Can do the bitfields
+    - [x] Can do the bitfields
     - [x] Can do the piece request
-    - [ ] Can send a Have message to all other peers
+    - [x] Can send a Have message to all other peers
 - [ ] Can seed the torrent file
 
 Jobs queue:
