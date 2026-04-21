@@ -14,10 +14,12 @@ use std::path::PathBuf;
 use tokio::time::timeout;
 use rand::seq::IndexedRandom;
 use tokio::sync::{Mutex, mpsc};
+use tracing::level_filters::LevelFilter;
 use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, SharedDownloads, Task};
 use tokio::sync::RwLock;
 use std::fs::OpenOptions;
-
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 
 #[derive(clap::Parser)]
 #[command(author, version, about = "torrent tracker")]
@@ -49,6 +51,15 @@ pub fn write_to_disk(pieces_downloaded: Vec<PieceDownloaded>, filename: String) 
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    // .with_thread_ids(true) 
+                    .with_thread_names(true) // This adds the name if you set one
+            )
+            .with(LevelFilter::INFO)
+            .init();
+
     let args = <Cli as clap::Parser>::parse();
     let file_path = &args.path;
 
@@ -150,6 +161,9 @@ async fn main() -> Result<(), Error> {
     for peer in connected_peers {        
         tokio::spawn(async move {
             println!("Call interact_loop on peer with id: {:?}", String::from_utf8_lossy(&peer.peer_id));
+            
+            // TODO: add logs using tracing = "0.1" tracing-subscriber = "0.3"
+
             let peer_result = peer.interact_loop().await;
 
             if let Err(e) = peer_result {
@@ -162,8 +176,6 @@ async fn main() -> Result<(), Error> {
     let shared_downloads = shared_downloads_arc.clone();
     tokio::spawn(async move {
         loop {
-            println!("In the task sending thread");
-                    
             // Remove downloaded requests
             let current_bitfield = shared_downloads.bitfield.read().await.clone();
             println!("current_bitfield.total_set() {}", current_bitfield.total_set());
@@ -191,7 +203,6 @@ async fn main() -> Result<(), Error> {
                                 .await;
 
                         if let Ok(()) = send_res {
-                            println!("Sent request for piece_index: {} to peer_index: {}", piece_req.piece_index, peer_index);
                             break;
                         }
                     };
