@@ -15,7 +15,7 @@ use tokio::time::timeout;
 use rand::seq::IndexedRandom;
 use tokio::sync::{Mutex, mpsc};
 use tracing::level_filters::LevelFilter;
-use crate::pieces::{Bitfield, PieceDownloaded, PieceReq, SharedDownloads, Task};
+use crate::pieces::{Bitfield, PieceDownloaded, PieceRequest, SharedDownloads, Task};
 use tokio::sync::RwLock;
 use std::fs::OpenOptions;
 use tracing_subscriber::fmt;
@@ -81,54 +81,55 @@ async fn main() -> Result<(), Error> {
     };
 
     let my_peer_id: &[u8; 20] = b"-GT0001-os9964142397"; // TODO: make a proper peer-id generator
+    // TODO: make a thread that serves port 6881
     let announce_response =
         announce::announce_to_tracker(announce_url, my_peer_id, &torrent_file, 6881).await?;
 
-    println!("Received {} bytes from tracker.", announce_response.len());
     let announce_bytes: &mut &[u8] = &mut announce_response.as_slice();
-    let save_path = format!(
-        "./samples/{}.bencode",
-        torrent_file.comment.unwrap_or(String::from("no-name"))
-    );
-    let _ = announce::save_file(&save_path, announce_bytes).await;
     let announce_ast = bencoding_parser::parse_bencode(announce_bytes).unwrap();
-
-    println!("{}", announce_ast);
 
     let announce_response = announce::parse_announce_response(announce_ast).map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
     println!("{:?}", announce_response);
 
     let total_amount_of_pieces = torrent_file.info.piece_hashes.len() as u64;
+    println!("total_amount_of_pieces: {}", total_amount_of_pieces);
+
     let piece_length = torrent_file.info.piece_length as u32;
-    let remainder = torrent_file.info.piece_hashes.len() as u32 % piece_length;
-    let last_piece_length = if remainder == 0 {
+    println!("piece_length: {}", piece_length);
+
+    let remainder = torrent_file.info.file_data.total_length() as u32 % piece_length;
+    println!("remainder: {}", remainder);
+    
+    let last_piece_length = if remainder == 0 { 
         piece_length
     } else {
         remainder
     };
 
-    let all_requests: Vec<PieceReq> = torrent_file.info
+    println!("last_piece_length: {}", last_piece_length);
+
+    let all_requests: Vec<PieceRequest> = torrent_file.info
                                                   .piece_hashes.iter()
                                                   .enumerate()
                                                   .map(|(piece_index, piece_hash)|
                                                    if (piece_index as u64) == total_amount_of_pieces - 1 {
-                                                      PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: last_piece_length}
+                                                      PieceRequest {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: last_piece_length}
                                                    } else {
-                                                      PieceReq {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: piece_length}
+                                                      PieceRequest {piece_hash: piece_hash.clone(), piece_index: (piece_index as u32), piece_length: piece_length}
                                                    })
                                                    .collect();
 
-    let piece_requests_arc: Arc<Mutex<Vec<PieceReq>>> = Arc::new(Mutex::new(all_requests));
+    let piece_requests_arc: Arc<Mutex<Vec<PieceRequest>>> = Arc::new(Mutex::new(all_requests));
 
     let peers = &announce_response.peers.clone();
     let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
-        .map(|_| mpsc::channel(4))
+        .map(|_| mpsc::channel(32))
         .collect();
 
     let shared_downloads_arc = Arc::new(SharedDownloads {
         bitfield: RwLock::new(Bitfield::new(total_amount_of_pieces)),
         pieces: RwLock::new(vec![]),
-    }); // Add a way to send the have messages to the tasks
+    });
 
     let mut connected_peers = vec![];
     let mut task_senders = vec![];
@@ -144,7 +145,7 @@ async fn main() -> Result<(), Error> {
                     task_receiver,
                     shared_downloads_arc.clone()
                     );
-        let peer = timeout(Duration::from_secs(1), peer_part).await;
+        let peer = timeout(Duration::from_secs(5), peer_part).await;
 
         match peer {
             Ok(Ok(connected_peer)) => {
@@ -152,8 +153,8 @@ async fn main() -> Result<(), Error> {
                 task_senders.push(task_sender);
 
             }
-            Ok(Err(e)) => { println!("Connection to {} peer failed with {}", peer_address.0, e); }
-            Err(e) => { println!("Connection to {} peer failed with {}", peer_address.0, e); }
+            Ok(Err(e)) => { tracing::error!("Connection to {} peer failed with {}", peer_address.0, e); }
+            Err(e) => { tracing::error!("Connection to {} peer failed with {}", peer_address.0, e); }
         }
     }
 
@@ -162,14 +163,12 @@ async fn main() -> Result<(), Error> {
     // Peer threads
     for peer in connected_peers {        
         tokio::spawn(async move {
-            println!("Call interact_loop on peer with id: {:?}", String::from_utf8_lossy(&peer.peer_id));
-            
-            // TODO: add logs using tracing = "0.1" tracing-subscriber = "0.3"
+            tracing::info!("Call interact_loop on peer with id: {:?}", String::from_utf8_lossy(&peer.peer_id));
 
             let peer_result = peer.interact_loop().await;
 
             if let Err(e) = peer_result {
-                eprintln!("Peer connection lost: {}", e);
+                tracing::error!("Peer connection lost: {}", e);
             }
         });
     }
@@ -180,39 +179,36 @@ async fn main() -> Result<(), Error> {
         loop {
             // Remove downloaded requests
             let current_bitfield = shared_downloads.bitfield.read().await.clone();
-
+            
             let mut piece_requests_guard = piece_requests_arc.lock().await;
             piece_requests_guard.retain(|req| !current_bitfield.has(req.piece_index));
-            let current_piece_requests = piece_requests_guard.clone();
+            let mut current_piece_requests = piece_requests_guard.clone();
             drop(piece_requests_guard);
 
             // Send out requests
-            for piece_req in current_piece_requests.iter() {
-                for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
-                    if peer_bitfield.lock().await.is_empty() {
-                        continue;
+            for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
+                let peer_bitfield_copy = peer_bitfield.lock().await.clone();
+                let fitting_requests: Vec<&PieceRequest> = current_piece_requests.iter()
+                                                                             .filter(|req| peer_bitfield_copy.has(req.piece_index))
+                                                                             .collect();
+                let mut consumed = vec![];
+                for req in fitting_requests {
+                    let try_res = task_senders[peer_index].try_send(Task::Request(req.clone()));
+                    if let Ok(()) = try_res {
+                        consumed.push(req.clone());
+                    } else {
+                        break;
                     }
+                }
 
-                    let has_piece = {
-                        let bf = peer_bitfield.lock().await;
-                        bf.has(piece_req.piece_index)
-                    };                    
-
-                    if has_piece {
-                        let send_res = task_senders[peer_index]
-                                .send_timeout(Task::Request(piece_req.clone()), Duration::from_millis(50)) // TODO: better solution?
-                                .await;
-
-                        if let Ok(()) = send_res {
-                            if !current_bitfield.is_close_to_done() {
-                                break; // Shotgun requests only if we are close to completion 
-                            }
-                        }
-                    };
+                if !current_bitfield.is_close_to_done() {
+                    // Shotgun requests only allowed if we are close to the completion 
+                    current_piece_requests.retain(|req| !consumed.contains(&req));
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            tracing::info!("Sent all pending requests, waiting for another cycle");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     });
 
@@ -220,7 +216,8 @@ async fn main() -> Result<(), Error> {
     let shared_downloads = shared_downloads_arc.clone();
     loop {
         let bitfield = shared_downloads.bitfield.read().await.clone();
-        println!("Total downloaded pieces: {}", bitfield.total_set());
+        tracing::info!("Total pieces to download: {}", bitfield.total());
+        tracing::info!("Total downloaded pieces: {}", bitfield.total_set());
 
         if bitfield.is_full() {
             let file_name = torrent_file.info.name.clone();

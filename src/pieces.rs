@@ -2,13 +2,12 @@ use std::{fmt, io::{Error, ErrorKind}};
 use sha1::{Digest, Sha1};
 use std::io::{Write, Seek, SeekFrom};
 use tokio::sync::RwLock;
-use crate::{peer::{ConnectedPeer, TorrentTcpMessage}, torrent_file::{FileData, TorrentInfo}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
     Interested,
     Have(u32),
-    Request(PieceReq),
+    Request(PieceRequest),
     Response(PieceResponse),
 }
 
@@ -20,7 +19,7 @@ pub struct PieceResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PieceReq {
+pub struct PieceRequest {
     pub piece_hash: [u8; 20],
     pub piece_index: u32,
     pub piece_length: u32,
@@ -29,7 +28,7 @@ pub struct PieceReq {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PieceDownloaded {
     pub piece_data: Vec<u8>,
-    pub piece_req: PieceReq
+    pub piece_req: PieceRequest
 }
 
 pub struct SharedDownloads {
@@ -77,9 +76,12 @@ impl Bitfield {
     }
 
     pub fn is_close_to_done(&self) -> bool {
-        let total_set = self.total_set();
-        let total = 8 * self.bytes.len() as u32;
-        total - total_set <= total.div_ceil(100) 
+        let total = self.total();
+        total - self.total_set() <= total.div_ceil(100) 
+    }
+
+    pub fn total(&self) -> u32 {
+        8 * self.bytes.len() as u32
     }
 
     pub fn total_set(&self) -> u32 {

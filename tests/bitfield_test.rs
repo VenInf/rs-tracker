@@ -37,7 +37,7 @@ mod tests {
     fn test_set_all_and_has() {
         let mut bf = Bitfield { bytes: vec![255] };
         
-        bf.set_all(vec![170]); 
+        bf.set_all(&vec![1,1,1,1,1,1,1,1]); 
 
         assert!(bf.has(0));
         assert!(!bf.has(1));
