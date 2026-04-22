@@ -50,7 +50,7 @@ async fn main() -> Result<(), Error> {
         return Err(Error::new(ErrorKind::InvalidData, "No announce-url"));
     };
 
-    let my_peer_id: &[u8; 20] = b"-GT0001-os9964142398"; // TODO: make a proper peer-id generator
+    let my_peer_id: &[u8; 20] = b"-GT0001-os9964142111"; // TODO: make a proper peer-id generator
     // TODO: make a thread that serves port 6881
     let announce_response =
         announce::announce_to_tracker(announce_url, my_peer_id, &torrent_file, 6881).await?;
@@ -268,10 +268,11 @@ pub fn write_to_disk(
 
     file.set_len(length)?;
 
-    for (idx, piece) in pieces_downloaded.iter().enumerate() {
-        let offset = (idx as u64) * (piece.piece_req.piece_length as u64);
+    let regular_piece_length = std::cmp::max(pieces_downloaded[0].piece_req.piece_length, pieces_downloaded[1].piece_req.piece_length);
+    for piece in pieces_downloaded.iter() {
+        
+        let offset = (piece.piece_req.piece_index as u64) * (regular_piece_length as u64);
         file.seek(SeekFrom::Start(offset))?;
-
         file.write_all(piece.piece_data.as_slice())?;
     }
     Ok(())

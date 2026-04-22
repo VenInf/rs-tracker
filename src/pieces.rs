@@ -74,7 +74,7 @@ impl Bitfield {
     }
 
     pub fn is_full(&self) -> bool {
-        self.bytes.iter().fold(1, |acc, x| acc & *x) == 1
+        self.total() == self.total_set()
     }
 
     pub fn is_close_to_done(&self) -> bool {
