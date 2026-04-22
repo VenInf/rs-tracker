@@ -6,61 +6,26 @@ mod peer;
 mod pieces;
 
 use std::sync::Arc;
-use std::thread::current;
-use std::time::Duration;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use tokio::time::timeout;
-use rand::seq::IndexedRandom;
 use tokio::sync::{Mutex, mpsc};
-use tracing::level_filters::LevelFilter;
 use crate::pieces::{Bitfield, PieceDownloaded, PieceRequest, SharedDownloads, Task};
 use tokio::sync::RwLock;
 use std::fs::OpenOptions;
-use tracing_subscriber::fmt;
-use tracing_subscriber::prelude::*;
+use std::collections::HashMap;
+use tokio::time::{Duration, Instant, timeout};
 
 #[derive(clap::Parser)]
-#[command(author, version, about = "torrent tracker")]
+#[command(author, version, about = "torrent client")]
 struct Cli {
     path: PathBuf,
 }
 
-pub fn write_to_disk(pieces_downloaded: Vec<PieceDownloaded>, filename: String) -> Result<(), Error> {
-    // TODO: do the write according to the TorrentFile
-    println!("Attempt to write to disc");
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(filename)?;
-
-    let length: u64 = pieces_downloaded.iter().map(|p| p.piece_req.piece_length as u64).sum();
-
-    file.set_len(length)?;
-
-    for (idx, piece) in pieces_downloaded.iter().enumerate() {
-        let offset = (idx as u64) * (piece.piece_req.piece_length as u64);
-        file.seek(SeekFrom::Start(offset))?;
-        
-        file.write_all(piece.piece_data.as_slice())?;
-    }
-    Ok(())
-}    
-
-
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    tracing_subscriber::registry()
-            .with(
-                fmt::layer()
-                    // .with_thread_ids(true) 
-                    .with_thread_names(true) 
-            )
-            .with(LevelFilter::INFO)
-            .init();
-
+    console_subscriber::init();
+    
     let args = <Cli as clap::Parser>::parse();
     let file_path = &args.path;
 
@@ -80,7 +45,7 @@ async fn main() -> Result<(), Error> {
         return Err(Error::new(ErrorKind::InvalidData, "No announce-url"));
     };
 
-    let my_peer_id: &[u8; 20] = b"-GT0001-os9964142397"; // TODO: make a proper peer-id generator
+    let my_peer_id: &[u8; 20] = b"-GT0001-os9964142398"; // TODO: make a proper peer-id generator
     // TODO: make a thread that serves port 6881
     let announce_response =
         announce::announce_to_tracker(announce_url, my_peer_id, &torrent_file, 6881).await?;
@@ -123,7 +88,7 @@ async fn main() -> Result<(), Error> {
 
     let peers = &announce_response.peers.clone();
     let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
-        .map(|_| mpsc::channel(32))
+        .map(|_| mpsc::channel(16))
         .collect();
 
     let shared_downloads_arc = Arc::new(SharedDownloads {
@@ -145,7 +110,7 @@ async fn main() -> Result<(), Error> {
                     task_receiver,
                     shared_downloads_arc.clone()
                     );
-        let peer = timeout(Duration::from_secs(5), peer_part).await;
+        let peer = timeout(Duration::from_secs(1), peer_part).await;
 
         match peer {
             Ok(Ok(connected_peer)) => {
@@ -175,6 +140,12 @@ async fn main() -> Result<(), Error> {
     
     // Thread that sends out the tasks to the peers
     let shared_downloads = shared_downloads_arc.clone();
+    let mut piece_timestamps: HashMap<PieceRequest, Instant> = HashMap::new();
+
+    // TODO: current issues:
+    // No requests sent?
+
+
     tokio::spawn(async move {
         loop {
             // Remove downloaded requests
@@ -185,28 +156,27 @@ async fn main() -> Result<(), Error> {
             let mut current_piece_requests = piece_requests_guard.clone();
             drop(piece_requests_guard);
 
-            // Send out requests
-            for (peer_index, peer_bitfield) in peer_bitfields.iter().enumerate() {
-                let peer_bitfield_copy = peer_bitfield.lock().await.clone();
-                let fitting_requests: Vec<&PieceRequest> = current_piece_requests.iter()
-                                                                             .filter(|req| peer_bitfield_copy.has(req.piece_index))
-                                                                             .collect();
-                let mut consumed = vec![];
-                for req in fitting_requests {
-                    let try_res = task_senders[peer_index].try_send(Task::Request(req.clone()));
-                    if let Ok(()) = try_res {
-                        consumed.push(req.clone());
-                    } else {
-                        break;
-                    }
-                }
+            // Send out requests 
 
-                if !current_bitfield.is_close_to_done() {
-                    // Shotgun requests only allowed if we are close to the completion 
-                    current_piece_requests.retain(|req| !consumed.contains(&req));
+            let mut peer_index = 0;
+            while let Some(piece_request) = current_piece_requests.pop() {    
+                if peer_bitfields[peer_index].lock().await.has(piece_request.piece_index) {
+                    if let Err(_) = task_senders[peer_index]
+                                    .send_timeout(
+                                                    Task::Request(piece_request.clone()), 
+                                                    Duration::from_millis(100))
+                                    .await {
+                        tracing::info!("Failed to push piece_request.piece_index {} to peer_index {}", piece_request.piece_index, peer_index);
+                        peer_index = peer_index + 1 % peer_bitfields.len();
+                    } else {
+                        tracing::info!("Pushed piece_request.piece_index {} to peer_index {}", piece_request.piece_index, peer_index);
+                    }
+                } else {
+                    peer_index = peer_index + 1 % peer_bitfields.len();
                 }
             }
-
+            
+            
             tracing::info!("Sent all pending requests, waiting for another cycle");
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
@@ -228,3 +198,25 @@ async fn main() -> Result<(), Error> {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }
+
+pub fn write_to_disk(pieces_downloaded: Vec<PieceDownloaded>, filename: String) -> Result<(), Error> {
+    // TODO: do the write according to the TorrentFile
+    println!("Attempt to write to disc");
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(filename)?;
+
+    let length: u64 = pieces_downloaded.iter().map(|p| p.piece_req.piece_length as u64).sum();
+
+    file.set_len(length)?;
+
+    for (idx, piece) in pieces_downloaded.iter().enumerate() {
+        let offset = (idx as u64) * (piece.piece_req.piece_length as u64);
+        file.seek(SeekFrom::Start(offset))?;
+        
+        file.write_all(piece.piece_data.as_slice())?;
+    }
+    Ok(())
+}    

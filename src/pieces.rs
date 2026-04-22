@@ -3,7 +3,7 @@ use sha1::{Digest, Sha1};
 use std::io::{Write, Seek, SeekFrom};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Task {
     Interested,
     Have(u32),
@@ -11,14 +11,14 @@ pub enum Task {
     Response(PieceResponse),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PieceResponse {
     pub index: u32,
     pub begin: u32,
     pub block: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PieceRequest {
     pub piece_hash: [u8; 20],
     pub piece_index: u32,
@@ -115,6 +115,16 @@ impl Bitfield {
 
     pub fn set_all(&mut self, bytes: &Vec<u8>) {
         self.bytes = bytes.clone();
+    }
+
+    pub fn unset(&mut self, piece_index: u32) {
+        let byte_index = piece_index / 8;
+        let bit_index = piece_index % 8;
+
+        if let Some(byte) = self.bytes.get_mut(byte_index as usize) {
+            let mask = 0b0111_1111 >> bit_index;
+            *byte &= mask;
+        }
     }
 
     pub fn diff(&self, bitfield: &Bitfield) -> Bitfield {

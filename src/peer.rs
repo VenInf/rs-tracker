@@ -4,10 +4,9 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::collections::HashMap;
 use std::fmt;
 use std::io::{Error, ErrorKind};
-use tokio::time::{Duration, Instant, timeout};
+use tokio::time::{Duration, timeout};
 use crate::{handshake};
 use crate::pieces::{Bitfield, PieceDownloaded, PieceRequest, PieceResponse, SharedDownloads, Task};
 use sha1::{Digest, Sha1};
@@ -19,7 +18,6 @@ pub struct ConnectedPeer {
     pub peer_bitfield_arc: Arc<Mutex<Bitfield>>,
     sent_have_bitfield_arc: Arc<Mutex<Bitfield>>,
     framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
-    message_timestamps_arc: Arc<Mutex<HashMap<TorrentTcpMessage, Instant>>>,
     caught_piece_responses_arc: Arc<Mutex<Vec<PieceResponse>>>,
     choked_sender: watch::Sender<bool>,
     choked_receiver: watch::Receiver<bool>,
@@ -70,7 +68,6 @@ impl ConnectedPeer {
             peer_bitfield_arc: Arc::new(Mutex::new(Bitfield::new(total_amount_of_pieces))),
             sent_have_bitfield_arc: Arc::new(Mutex::new(Bitfield::new(total_amount_of_pieces))),
             caught_piece_responses_arc: Arc::new(Mutex::new(vec![])),
-            message_timestamps_arc: Arc::new(Mutex::new(HashMap::new())),
             framed_stream,
             choked_sender,
             choked_receiver,
@@ -121,20 +118,8 @@ impl ConnectedPeer {
         Ok(())
     }
 
-    pub async fn send_request_message(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, request_permits_receiver: &mut  mpsc::Receiver<()>, message_timestamps_arc: Arc<Mutex<HashMap<TorrentTcpMessage, Instant>>>, message: TorrentTcpMessage) -> Result<(), Error> {            
+    pub async fn send_request_message(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, request_permits_receiver: &mut  mpsc::Receiver<()>, message: TorrentTcpMessage) -> Result<(), Error> {            
         if let TorrentTcpMessage::Request { index, begin, length } = message {
-
-            let mut request_timestamps_guard = message_timestamps_arc.lock().await;
-            if let Some(instance) = request_timestamps_guard.get(&message) {
-                if instance.elapsed() < Duration::from_secs(60) {
-                    tracing::error!("Caught duplicate request");
-                    return Ok(())
-                }
-            } else {
-                request_timestamps_guard.insert(message.clone(), Instant::now());
-                drop(request_timestamps_guard);
-            }
-
             request_permits_receiver.recv().await;
             choked_receiver.wait_for(|&is_choked| !is_choked)
                 .await
@@ -145,13 +130,13 @@ impl ConnectedPeer {
         Self::send_message(sink, message).await
     }
 
-    pub async fn send_download_pieces(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, request_permits_receiver: &mut  mpsc::Receiver<()>, message_timestamps_arc: Arc<Mutex<HashMap<TorrentTcpMessage, Instant>>>, task: PieceRequest) -> Result<(), Error> {
+    pub async fn send_download_pieces(sink: &mut SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>, choked_receiver: &mut watch::Receiver<bool>, request_permits_receiver: &mut  mpsc::Receiver<()>, task: PieceRequest) -> Result<(), Error> {
         let block_size = 16384;
         
         for offset in (0..task.piece_length).step_by(block_size as usize) {
             let length = std::cmp::min(block_size, task.piece_length - offset);
             let req_message = TorrentTcpMessage::Request { index: task.piece_index, begin: offset, length };            
-            Self::send_request_message(sink, choked_receiver, request_permits_receiver, message_timestamps_arc.clone(), req_message).await?;
+            Self::send_request_message(sink, choked_receiver, request_permits_receiver, req_message).await?;
         }
 
         Ok(())
@@ -213,7 +198,7 @@ impl ConnectedPeer {
                     TorrentTcpMessage::Have(piece_index) => {
                         tracing::info!("Caught Have from {}", String::from_utf8_lossy(&self.peer_id));
                         peer_bitfield.lock().await.set(piece_index);
-                        let bitfield = shared_downloads.bitfield.write().await.clone();
+                        let bitfield = shared_downloads.bitfield.read().await;
                         if !bitfield.has(piece_index) {
                             let _ = tasks_sender.send(Task::Interested).await;
                         }
@@ -265,7 +250,7 @@ impl ConnectedPeer {
                         }
                         Task::Request(piece_req) => {
                             tracing::info!("Sending Request to {}, piece_index: {} ", String::from_utf8_lossy(&self.peer_id), piece_req.piece_index);
-                            let _ = Self::send_download_pieces(&mut sink, &mut choked_receiver, &mut request_permits_receiver, self.message_timestamps_arc.clone(), piece_req.clone()).await;
+                            let _ = Self::send_download_pieces(&mut sink, &mut choked_receiver, &mut request_permits_receiver, piece_req.clone()).await;
                             let _ = accepted_piece_req_sender.send(piece_req.clone()).await;
                         }                        
                     }
@@ -301,7 +286,7 @@ impl ConnectedPeer {
 
         let caught_piece_responses = self.caught_piece_responses_arc.clone();
         let shared_downloads = self.shared_downloads_arc.clone();
-
+        let peer_bitfield = self.peer_bitfield_arc.clone();
         // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
         tokio::spawn(async move {
             while let Some(accepted_piece_req) = accepted_piece_req_receiver.recv().await {
@@ -316,10 +301,9 @@ impl ConnectedPeer {
                                                                               .cloned()
                                                                               .collect();
 
-                    if timer.elapsed() > tokio::time::Duration::from_secs(120) {
-                        // Max time per block
-                        tracing::info!("Collecting took too long for the piece_index: {}", accepted_piece_req.piece_index);
-                        // TODO: unset piece in the peer's bitfield 
+                    if timer.elapsed() > tokio::time::Duration::from_secs(10) {
+                        tracing::error!("Collecting took too long for the piece_index: {}", accepted_piece_req.piece_index);
+                        peer_bitfield.lock().await.unset(accepted_piece_req.piece_index);
                         piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
 
                         break;
@@ -357,8 +341,7 @@ impl ConnectedPeer {
                         tracing::error!("{:?}", piece_response);
 
                         return Err(Error::new(ErrorKind::InvalidData, "Wrong piece_hash received, break the connection"))
-                    }
-                                    
+                    }         
                 };
             }
             return Ok(());

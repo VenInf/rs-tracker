@@ -8,7 +8,8 @@ clap = { version = "4.0", features = ["derive"] }
 winnow = "1.0.1"
 sha1 = "0.11.0"
 reqwest = "0.13.2"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.51", features = ["full", "tracing"] }
+console-subscriber = "0.5"
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 futures-util = { version = "0.3", features = ["sink"] }
 url = "2.2"
