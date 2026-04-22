@@ -30,9 +30,17 @@ pub async fn announce_to_tracker<'a>(
 
     let client = reqwest::Client::new();
 
-    let response = client.get(&full_url).send().await.map_err(|_e| Error::new(ErrorKind::ConnectionRefused , format!("Failed to get {}", full_url)))?;
+    let response = client.get(&full_url).send().await.map_err(|_e| {
+        Error::new(
+            ErrorKind::ConnectionRefused,
+            format!("Failed to get {}", full_url),
+        )
+    })?;
 
-    let bytes = response.bytes().await.map_err(|_e| Error::new(ErrorKind::InvalidData , "Failed to get bytes"))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_e| Error::new(ErrorKind::InvalidData, "Failed to get bytes"))?;
 
     Ok(bytes.to_vec())
 }

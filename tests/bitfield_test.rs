@@ -5,7 +5,7 @@ mod tests {
     #[test]
     fn test_bitfield_basic_set_has() {
         let mut bf = Bitfield { bytes: vec![0, 0] };
-        
+
         assert!(!bf.has(0));
         assert!(!bf.has(7));
         assert!(!bf.has(8));
@@ -25,19 +25,19 @@ mod tests {
 
         bf.set(0);
         bf.set(7);
-        
+
         assert!(bf.has(0));
         assert!(bf.has(7));
         assert!(!bf.has(3));
-        
+
         assert_eq!(bf.bytes[0], 129);
     }
 
     #[test]
     fn test_set_all_and_has() {
         let mut bf = Bitfield { bytes: vec![255] };
-        
-        bf.set_all(&vec![1,1,1,1,1,1,1,1]); 
+
+        bf.set_all(&vec![1, 1, 1, 1, 1, 1, 1, 1]);
 
         assert!(bf.has(0));
         assert!(!bf.has(1));
@@ -52,12 +52,12 @@ mod tests {
     #[test]
     fn test_out_of_bounds_safety() {
         let mut bf = Bitfield { bytes: vec![0] };
-        
+
         // Testing 'has' beyond the vector length should not panic
         assert!(!bf.has(100));
 
         // Testing 'set' beyond the vector length should not panic
-        bf.set(100); 
+        bf.set(100);
         assert_eq!(bf.bytes.len(), 1, "Length should not have changed");
     }
 }

@@ -84,8 +84,7 @@ impl<'a> AST<'a> {
                 [b"i".to_vec(), i_bytes, b"e".to_vec()].concat()
             }
             AST::List(l) => {
-                let list_bytes: Vec<u8> =
-                    l.iter().flat_map(|node| node.serialize()).collect();
+                let list_bytes: Vec<u8> = l.iter().flat_map(|node| node.serialize()).collect();
                 [b"l".to_vec(), list_bytes, b"e".to_vec()].concat()
             }
             AST::Dictionary(d) => {
@@ -105,11 +104,9 @@ impl<'a> AST<'a> {
     }
 
     // TODO: rewrite this???
-    pub fn get_from_dict(&'a self, key: &'a[u8]) -> Option<&'a AST<'a>> {
+    pub fn get_from_dict(&'a self, key: &'a [u8]) -> Option<&'a AST<'a>> {
         match self {
-            AST::Dictionary(map) => {
-                map.get(&AST::ByteString(key))
-            }
+            AST::Dictionary(map) => map.get(&AST::ByteString(key)),
             _ => None,
         }
     }
@@ -121,7 +118,7 @@ impl<'a> AST<'a> {
         None
     }
 
-    pub fn get_int(&self, key: &'a[u8]) -> Option<i64> {
+    pub fn get_int(&self, key: &'a [u8]) -> Option<i64> {
         if let Some(AST::Integer(i)) = self.get_from_dict(key) {
             return Some(*i);
         }
@@ -135,7 +132,7 @@ impl<'a> AST<'a> {
         None
     }
 
-    pub fn get_str(&'a self, key: &'a[u8]) -> Option<String> {
+    pub fn get_str(&'a self, key: &'a [u8]) -> Option<String> {
         if let Some(AST::ByteString(b)) = self.get_from_dict(key) {
             return String::from_utf8(b.to_vec()).ok();
         }

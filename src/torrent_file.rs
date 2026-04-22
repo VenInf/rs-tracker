@@ -43,9 +43,9 @@ impl FileData {
     pub fn total_length(self) -> u64 {
         match self {
             FileData::Single { length } => length as u64,
-            FileData::Multi { files } => files.iter().map(|file| file.length as u64).sum() 
+            FileData::Multi { files } => files.iter().map(|file| file.length as u64).sum(),
         }
-    } 
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,9 +69,7 @@ impl fmt::Display for ConversionError {
     }
 }
 
-pub fn bentree_to_torrent_file<'a>(
-    ast: &'a BP::AST<'a>,
-) -> Result<TorrentFile, ConversionError> {
+pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile, ConversionError> {
     let announce = ast.get_str(b"announce");
 
     let info_dict = ast

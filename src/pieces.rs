@@ -1,6 +1,9 @@
-use std::{fmt, io::{Error, ErrorKind}};
 use sha1::{Digest, Sha1};
-use std::io::{Write, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
+use std::{
+    fmt,
+    io::{Error, ErrorKind},
+};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,7 +31,7 @@ pub struct PieceRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PieceDownloaded {
     pub piece_data: Vec<u8>,
-    pub piece_req: PieceRequest
+    pub piece_req: PieceRequest,
 }
 
 pub struct SharedDownloads {
@@ -37,12 +40,7 @@ pub struct SharedDownloads {
 }
 
 impl SharedDownloads {
-        pub async fn get_block(
-        &self,
-        index: u32,
-        begin: u32,
-        length: u32,
-    ) -> Option<Vec<u8>> {
+    pub async fn get_block(&self, index: u32, begin: u32, length: u32) -> Option<Vec<u8>> {
         let pieces_guard = self.pieces.read().await;
         let piece = pieces_guard.get(index as usize)?;
 
@@ -64,7 +62,9 @@ pub struct Bitfield {
 
 impl Bitfield {
     pub fn new(total_pieces_amount: u64) -> Self {
-        Self { bytes: vec![0; total_pieces_amount.div_ceil(8) as usize] }
+        Self {
+            bytes: vec![0; total_pieces_amount.div_ceil(8) as usize],
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -77,7 +77,7 @@ impl Bitfield {
 
     pub fn is_close_to_done(&self) -> bool {
         let total = self.total();
-        total - self.total_set() <= total.div_ceil(100) 
+        total - self.total_set() <= total.div_ceil(100)
     }
 
     pub fn total(&self) -> u32 {
@@ -85,7 +85,8 @@ impl Bitfield {
     }
 
     pub fn total_set(&self) -> u32 {
-        self.bytes.iter()
+        self.bytes
+            .iter()
             .map(|&byte| byte.count_ones() as u32)
             .sum()
     }
@@ -128,10 +129,12 @@ impl Bitfield {
     }
 
     pub fn diff(&self, bitfield: &Bitfield) -> Bitfield {
-        let bytes = self.bytes.iter()
-                      .zip(bitfield.bytes.iter())
-                      .map(|(b1, b2)| b1 & !b2 ) // Set in b1 but not set in b2
-                      .collect();
+        let bytes = self
+            .bytes
+            .iter()
+            .zip(bitfield.bytes.iter())
+            .map(|(b1, b2)| b1 & !b2) // Set in b1 but not set in b2
+            .collect();
         Bitfield { bytes }
     }
 
@@ -153,7 +156,7 @@ impl Bitfield {
                     .collect::<Vec<u32>>()
             })
             .collect()
-    }        
+    }
 }
 
 impl std::fmt::Display for Bitfield {
@@ -164,7 +167,9 @@ impl std::fmt::Display for Bitfield {
 
         for i in 0..display_limit {
             bits.push_str(&format!("{:08b}", self.bytes[i]));
-            if i < display_limit - 1 { bits.push(' '); }
+            if i < display_limit - 1 {
+                bits.push(' ');
+            }
         }
 
         if self.bytes.len() > 4 {
