@@ -254,7 +254,6 @@ impl ConnectedPeer {
                             let _ = accepted_piece_req_sender.send(piece_req.clone()).await;
                         }                        
                     }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
         });        
@@ -280,7 +279,8 @@ impl ConnectedPeer {
                         sent_have_bitfield.set(piece_index);
                      }
                 }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                drop(sent_have_bitfield);
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         });
 

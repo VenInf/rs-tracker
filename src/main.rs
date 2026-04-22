@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinSet;
+use tracing::Instrument;
 use crate::pieces::{Bitfield, PieceDownloaded, PieceRequest, SharedDownloads, Task};
 use tokio::sync::RwLock;
 use std::fs::OpenOptions;
@@ -86,7 +88,7 @@ async fn main() -> Result<(), Error> {
 
     let piece_requests_arc: Arc<Mutex<Vec<PieceRequest>>> = Arc::new(Mutex::new(all_requests));
 
-    let peers = &announce_response.peers.clone();
+    let peers = announce_response.peers.clone();
     let task_channels: Vec<(mpsc::Sender<Task>, mpsc::Receiver<Task>)> = (0..peers.len())
         .map(|_| mpsc::channel(16))
         .collect();
@@ -96,37 +98,48 @@ async fn main() -> Result<(), Error> {
         pieces: RwLock::new(vec![]),
     });
 
+
+    let mut peer_init_set = JoinSet::new();
+
+    for (peer_address, (task_sender, task_receiver)) in peers.into_iter().zip(task_channels) {
+        let shared_downloads = shared_downloads_arc.clone();
+
+        peer_init_set.spawn(async move {
+            let peer_part = peer::ConnectedPeer::new(
+                        peer_address.clone(),
+                        torrent_file.info_hash,
+                        my_peer_id.clone(),
+                        total_amount_of_pieces,
+                        task_sender.clone(),
+                        task_receiver,
+                        shared_downloads
+                        );
+            let peer_res = timeout(Duration::from_secs(10), peer_part).await
+                                                                      .map_err(|_| Error::new(ErrorKind::TimedOut, "Deadline has elapsed"))
+                                                                      .flatten();
+            (task_sender, peer_res)
+        });
+    }
+
     let mut connected_peers = vec![];
     let mut task_senders = vec![];
 
-    for (peer_address, (task_sender, task_receiver)) in peers.iter().zip(task_channels) {
-        // TODO: make this process parallel
-        let peer_part = peer::ConnectedPeer::new(
-                    peer_address.clone(),
-                    torrent_file.info_hash,
-                    my_peer_id.clone(),
-                    total_amount_of_pieces,
-                    task_sender.clone(),
-                    task_receiver,
-                    shared_downloads_arc.clone()
-                    );
-        let peer = timeout(Duration::from_secs(1), peer_part).await;
-
-        match peer {
-            Ok(Ok(connected_peer)) => {
+    while let Some(set_res) = peer_init_set.join_next().await {
+        match set_res {
+            Ok((task_sender, Ok(connected_peer))) => {
                 connected_peers.push(connected_peer);
                 task_senders.push(task_sender);
 
             }
-            Ok(Err(e)) => { tracing::error!("Connection to {} peer failed with {}", peer_address.0, e); }
-            Err(e) => { tracing::error!("Connection to {} peer failed with {}", peer_address.0, e); }
+            Ok((_, Err(e))) => { tracing::error!("Connection failed with {}", e); }
+            Err(e) => { tracing::error!("Connection failed with {}", e); }
         }
     }
 
     let peer_bitfields: Vec<Arc<Mutex<Bitfield>>> = connected_peers.iter().map(|peer| peer.peer_bitfield_arc.clone()).collect(); 
 
     // Peer threads
-    for peer in connected_peers {        
+    for peer in connected_peers {
         tokio::spawn(async move {
             tracing::info!("Call interact_loop on peer with id: {:?}", String::from_utf8_lossy(&peer.peer_id));
 
@@ -140,11 +153,10 @@ async fn main() -> Result<(), Error> {
     
     // Thread that sends out the tasks to the peers
     let shared_downloads = shared_downloads_arc.clone();
-    let mut piece_timestamps: HashMap<PieceRequest, Instant> = HashMap::new();
 
     // TODO: current issues:
     // No requests sent?
-
+    // Potentail deadlock?
 
     tokio::spawn(async move {
         loop {
