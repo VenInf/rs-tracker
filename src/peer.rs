@@ -35,7 +35,7 @@ impl ConnectedPeer {
         address: (String, u16),
         info_hash: [u8; 20],
         my_peer_id: [u8; 20],
-        total_amount_of_pieces: u64,
+        total_amount_of_pieces: u32,
         tasks_sender: mpsc::Sender<Task>,
         tasks_receiver: mpsc::Receiver<Task>,
         shared_downloads_arc: Arc<SharedDownloads>,

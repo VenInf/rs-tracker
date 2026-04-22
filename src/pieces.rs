@@ -57,12 +57,14 @@ impl SharedDownloads {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bitfield {
+    pub total_pieces_amount: u32,
     pub bytes: Vec<u8>, // Has to be equal to the amount of pieces
 }
 
 impl Bitfield {
-    pub fn new(total_pieces_amount: u64) -> Self {
+    pub fn new(total_pieces_amount: u32) -> Self {
         Self {
+            total_pieces_amount,
             bytes: vec![0; total_pieces_amount.div_ceil(8) as usize],
         }
     }
@@ -81,7 +83,7 @@ impl Bitfield {
     }
 
     pub fn total(&self) -> u32 {
-        8 * self.bytes.len() as u32
+        self.total_pieces_amount 
     }
 
     pub fn total_set(&self) -> u32 {
@@ -129,13 +131,14 @@ impl Bitfield {
     }
 
     pub fn diff(&self, bitfield: &Bitfield) -> Bitfield {
+        let total_pieces_amount = std::cmp::max(self.total(), bitfield.total());
         let bytes = self
             .bytes
             .iter()
             .zip(bitfield.bytes.iter())
             .map(|(b1, b2)| b1 & !b2) // Set in b1 but not set in b2
             .collect();
-        Bitfield { bytes }
+        Bitfield { total_pieces_amount, bytes }
     }
 
     pub fn get_set_indices(&self) -> Vec<u32> {

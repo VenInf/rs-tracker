@@ -14,10 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant, timeout};
-use tracing::Instrument;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tokio::time::{Duration, timeout};
 
 #[derive(clap::Parser)]
 #[command(author, version, about = "torrent client")]
@@ -65,7 +62,7 @@ async fn main() -> Result<(), Error> {
         .map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
     println!("{:?}", announce_response);
 
-    let total_amount_of_pieces = torrent_file.info.piece_hashes.len() as u64;
+    let total_amount_of_pieces = torrent_file.info.piece_hashes.len() as u32;
     println!("total_amount_of_pieces: {}", total_amount_of_pieces);
 
     let piece_length = torrent_file.info.piece_length as u32;
@@ -86,7 +83,7 @@ async fn main() -> Result<(), Error> {
         .iter()
         .enumerate()
         .map(|(piece_index, piece_hash)| {
-            if (piece_index as u64) == total_amount_of_pieces - 1 {
+            if (piece_index as u32) == total_amount_of_pieces - 1 {
                 PieceRequest {
                     piece_hash: piece_hash.clone(),
                     piece_index: (piece_index as u32),
@@ -187,16 +184,10 @@ async fn main() -> Result<(), Error> {
         .name(&format!("Main request sender thread"))
         .spawn(async move {
             loop {
-                // Remove downloaded requests
-                let current_bitfield = shared_downloads.bitfield.read().await.clone();
-
-                let mut piece_requests_guard = piece_requests_arc.lock().await;
-                piece_requests_guard.retain(|req| !current_bitfield.has(req.piece_index));
-                let mut current_piece_requests = piece_requests_guard.clone();
-                drop(piece_requests_guard);
+                let mut current_piece_requests = piece_requests_arc.lock().await.clone();
+                current_piece_requests.reverse();
 
                 // Send out requests
-
                 let mut peer_index = 0;
                 while let Some(piece_request) = current_piece_requests.pop() {
                     if peer_bitfields[peer_index]
@@ -216,7 +207,7 @@ async fn main() -> Result<(), Error> {
                                 piece_request.piece_index,
                                 peer_index
                             );
-                            peer_index = peer_index + 1 % peer_bitfields.len();
+                            peer_index = (peer_index + 1) % peer_bitfields.len();
                         } else {
                             tracing::info!(
                                 "Pushed piece_request.piece_index {} to peer_index {}",
@@ -225,11 +216,20 @@ async fn main() -> Result<(), Error> {
                             );
                         }
                     } else {
-                        peer_index = peer_index + 1 % peer_bitfields.len();
+                        peer_index = (peer_index + 1) % peer_bitfields.len();
                     }
                 }
 
-                tracing::info!("Sent all pending requests, waiting for another cycle");
+                tracing::info!("Sent all pending requests");
+
+
+                // Remove downloaded requests
+                let current_bitfield = shared_downloads.bitfield.read().await.clone();
+                let mut piece_requests_guard = piece_requests_arc.lock().await;
+                piece_requests_guard.retain(|req| !current_bitfield.has(req.piece_index));
+                drop(piece_requests_guard);
+
+                tracing::info!("Removed all downloaded requests, waiting for another cycle");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         })
