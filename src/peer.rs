@@ -504,15 +504,7 @@ impl ConnectedPeer {
                             accepted_piece_req.piece_index
                         );
 
-                        shared_downloads
-                            .bitfield
-                            .write()
-                            .await
-                            .set(accepted_piece_req.piece_index);
-                        shared_downloads.pieces.write().await.push(PieceDownloaded {
-                            piece_data,
-                            piece_req: accepted_piece_req,
-                        });
+                        shared_downloads.set_piece(accepted_piece_req, piece_data).await;
                         piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
                         break;
                     } else {

@@ -270,7 +270,6 @@ pub fn write_to_disk(
 
     let regular_piece_length = std::cmp::max(pieces_downloaded[0].piece_req.piece_length, pieces_downloaded[1].piece_req.piece_length);
     for piece in pieces_downloaded.iter() {
-        
         let offset = (piece.piece_req.piece_index as u64) * (regular_piece_length as u64);
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(piece.piece_data.as_slice())?;
