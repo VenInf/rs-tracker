@@ -25,7 +25,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     console_subscriber::init();
-    
+
     let args = <Cli as clap::Parser>::parse();
     let file_path = &args.path;
 
@@ -222,7 +222,6 @@ async fn main() -> Result<(), Error> {
 
                 tracing::info!("Sent all pending requests");
 
-
                 // Remove downloaded requests
                 let current_bitfield = shared_downloads.bitfield.read().await.clone();
                 let mut piece_requests_guard = piece_requests_arc.lock().await;
@@ -268,7 +267,10 @@ pub fn write_to_disk(
 
     file.set_len(length)?;
 
-    let regular_piece_length = std::cmp::max(pieces_downloaded[0].piece_req.piece_length, pieces_downloaded[1].piece_req.piece_length);
+    let regular_piece_length = std::cmp::max(
+        pieces_downloaded[0].piece_req.piece_length,
+        pieces_downloaded[1].piece_req.piece_length,
+    );
     for piece in pieces_downloaded.iter() {
         let offset = (piece.piece_req.piece_index as u64) * (regular_piece_length as u64);
         file.seek(SeekFrom::Start(offset))?;

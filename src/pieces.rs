@@ -57,16 +57,13 @@ impl SharedDownloads {
     pub async fn set_piece(&self, piece_req: PieceRequest, piece_data: Vec<u8>) {
         let mut pieces_guard = self.pieces.write().await;
         if !self.bitfield.read().await.has(piece_req.piece_index) {
-            self.bitfield
-                .write()
-                .await
-                .set(piece_req.piece_index);
+            self.bitfield.write().await.set(piece_req.piece_index);
 
             pieces_guard.push(PieceDownloaded {
                 piece_data,
                 piece_req: piece_req,
-            });        
-        } 
+            });
+        }
         drop(pieces_guard);
     }
 }
@@ -99,7 +96,7 @@ impl Bitfield {
     }
 
     pub fn total(&self) -> u32 {
-        self.total_pieces_amount 
+        self.total_pieces_amount
     }
 
     pub fn total_set(&self) -> u32 {
@@ -154,7 +151,10 @@ impl Bitfield {
             .zip(bitfield.bytes.iter())
             .map(|(b1, b2)| b1 & !b2) // Set in b1 but not set in b2
             .collect();
-        Bitfield { total_pieces_amount, bytes }
+        Bitfield {
+            total_pieces_amount,
+            bytes,
+        }
     }
 
     pub fn get_set_indices(&self) -> Vec<u32> {

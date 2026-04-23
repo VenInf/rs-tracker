@@ -323,7 +323,7 @@ impl ConnectedPeer {
                                 });
                                 let _ = tasks_sender.send(response_task).await;
                             }
-                        }                        
+                        }
                         _ => {
                             return Err(Error::new(
                                 ErrorKind::InvalidData,
@@ -345,59 +345,63 @@ impl ConnectedPeer {
                 String::from_utf8_lossy(&self.peer_id)
             ))
             .spawn(async move {
-            loop {
-                if let Some(task) = tasks_receiver.recv().await {
-                    match task {
-                        Task::Interested => {
-                            tracing::info!(
-                                "Sending Interested {}",
-                                String::from_utf8_lossy(&self.peer_id)
-                            );
-                            let _ =
-                                Self::send_message(&mut sink, TorrentTcpMessage::Interested).await;
-                        }
-                        Task::Have(piece_index) => {
-                            tracing::info!("Sending Have {}", piece_index);
-                            let _ =
-                                Self::send_message(&mut sink, TorrentTcpMessage::Have(piece_index))
-                                    .await;
-                        }
-                        Task::Response(PieceResponse {
-                            index,
-                            begin,
-                            block,
-                        }) => {
-                            tracing::info!(
-                                "Sending Piece {}, index: {} ",
-                                String::from_utf8_lossy(&self.peer_id),
-                                index
-                            );
-                            let resonse_message = TorrentTcpMessage::Piece {
+                loop {
+                    if let Some(task) = tasks_receiver.recv().await {
+                        match task {
+                            Task::Interested => {
+                                tracing::info!(
+                                    "Sending Interested {}",
+                                    String::from_utf8_lossy(&self.peer_id)
+                                );
+                                let _ =
+                                    Self::send_message(&mut sink, TorrentTcpMessage::Interested)
+                                        .await;
+                            }
+                            Task::Have(piece_index) => {
+                                tracing::info!("Sending Have {}", piece_index);
+                                let _ = Self::send_message(
+                                    &mut sink,
+                                    TorrentTcpMessage::Have(piece_index),
+                                )
+                                .await;
+                            }
+                            Task::Response(PieceResponse {
                                 index,
                                 begin,
                                 block,
-                            };
-                            let _ = Self::send_message(&mut sink, resonse_message).await;
-                        }
-                        Task::Request(piece_req) => {
-                            tracing::info!(
-                                "Sending Request to {}, piece_index: {} ",
-                                String::from_utf8_lossy(&self.peer_id),
-                                piece_req.piece_index
-                            );
-                            let _ = Self::send_download_pieces(
-                                &mut sink,
-                                &mut choked_receiver,
-                                &mut request_permits_receiver,
-                                piece_req.clone(),
-                            )
-                            .await;
-                            let _ = accepted_piece_req_sender.send(piece_req.clone()).await;
+                            }) => {
+                                tracing::info!(
+                                    "Sending Piece {}, index: {} ",
+                                    String::from_utf8_lossy(&self.peer_id),
+                                    index
+                                );
+                                let resonse_message = TorrentTcpMessage::Piece {
+                                    index,
+                                    begin,
+                                    block,
+                                };
+                                let _ = Self::send_message(&mut sink, resonse_message).await;
+                            }
+                            Task::Request(piece_req) => {
+                                tracing::info!(
+                                    "Sending Request to {}, piece_index: {} ",
+                                    String::from_utf8_lossy(&self.peer_id),
+                                    piece_req.piece_index
+                                );
+                                let _ = Self::send_download_pieces(
+                                    &mut sink,
+                                    &mut choked_receiver,
+                                    &mut request_permits_receiver,
+                                    piece_req.clone(),
+                                )
+                                .await;
+                                let _ = accepted_piece_req_sender.send(piece_req.clone()).await;
+                            }
                         }
                     }
                 }
-            }
-        }).expect("Failed to create a Sender");
+            })
+            .expect("Failed to create a Sender");
 
         let peer_bitfield = self.peer_bitfield_arc.clone();
         let sent_have_bitfield = self.sent_have_bitfield_arc.clone();
@@ -411,7 +415,7 @@ impl ConnectedPeer {
                 String::from_utf8_lossy(&self.peer_id)
             ))
             .spawn(async move {
-                 loop {
+                loop {
                     let peer_bitfield = peer_bitfield.lock().await.clone();
                     let shared_downloads_bitfield = shared_downloads.bitfield.read().await.clone();
                     let mut sent_have_bitfield = sent_have_bitfield.lock().await;
@@ -425,10 +429,11 @@ impl ConnectedPeer {
                             sent_have_bitfield.set(piece_index);
                         }
                     }
-                drop(sent_have_bitfield);
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-        }).expect("Failed to create a Haves sender");
+                    drop(sent_have_bitfield);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+            })
+            .expect("Failed to create a Haves sender");
 
         let caught_piece_responses = self.caught_piece_responses_arc.clone();
         let shared_downloads = self.shared_downloads_arc.clone();
@@ -441,89 +446,92 @@ impl ConnectedPeer {
                 String::from_utf8_lossy(&self.peer_id)
             ))
             .spawn(async move {
-            while let Some(accepted_piece_req) = accepted_piece_req_receiver.recv().await {
-                tracing::info!(
-                    "Collecting blocks for the piece_index: {}",
-                    accepted_piece_req.piece_index
-                );
-                let timer = tokio::time::Instant::now();
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                while let Some(accepted_piece_req) = accepted_piece_req_receiver.recv().await {
+                    tracing::info!(
+                        "Collecting blocks for the piece_index: {}",
+                        accepted_piece_req.piece_index
+                    );
+                    let timer = tokio::time::Instant::now();
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-                    let mut piece_responses_guard = caught_piece_responses.lock().await;
-                    let mut piece_response: Vec<PieceResponse> = piece_responses_guard
-                        .iter()
-                        .filter(|bp| bp.index == accepted_piece_req.piece_index)
-                        .cloned()
-                        .collect();
+                        let mut piece_responses_guard = caught_piece_responses.lock().await;
+                        let mut piece_response: Vec<PieceResponse> = piece_responses_guard
+                            .iter()
+                            .filter(|bp| bp.index == accepted_piece_req.piece_index)
+                            .cloned()
+                            .collect();
 
-                    if timer.elapsed() > tokio::time::Duration::from_secs(10) {
-                        tracing::error!(
-                            "Collecting took too long for the piece_index: {}",
-                            accepted_piece_req.piece_index
-                        );
-                        peer_bitfield
-                            .lock()
-                            .await
-                            .unset(accepted_piece_req.piece_index);
-                        piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
+                        if timer.elapsed() > tokio::time::Duration::from_secs(10) {
+                            tracing::error!(
+                                "Collecting took too long for the piece_index: {}",
+                                accepted_piece_req.piece_index
+                            );
+                            peer_bitfield
+                                .lock()
+                                .await
+                                .unset(accepted_piece_req.piece_index);
+                            piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
 
-                        break;
-                    }
+                            break;
+                        }
 
-                    let current_length: u32 =
-                        piece_response.iter().map(|bp| bp.block.len() as u32).sum();
+                        let current_length: u32 =
+                            piece_response.iter().map(|bp| bp.block.len() as u32).sum();
 
-                    if current_length < accepted_piece_req.piece_length {
-                        continue;
-                    }
-                    if current_length > accepted_piece_req.piece_length {
-                        tracing::error!(
-                            "Caught more pieces then expected! for piece_index: {}",
-                            accepted_piece_req.piece_index
-                        );
-                        tracing::error!("Caught pieces trace:");
-                        tracing::error!("{:?}", piece_response);
+                        if current_length < accepted_piece_req.piece_length {
+                            continue;
+                        }
+                        if current_length > accepted_piece_req.piece_length {
+                            tracing::error!(
+                                "Caught more pieces then expected! for piece_index: {}",
+                                accepted_piece_req.piece_index
+                            );
+                            tracing::error!("Caught pieces trace:");
+                            tracing::error!("{:?}", piece_response);
 
-                        piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
-                        break;
-                    }
+                            piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
+                            break;
+                        }
 
-                    piece_response.sort();
+                        piece_response.sort();
 
-                    let piece_data: Vec<u8> = piece_response
-                        .iter()
-                        .flat_map(|piece| piece.block.iter())
-                        .copied()
-                        .collect();
-                    let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
+                        let piece_data: Vec<u8> = piece_response
+                            .iter()
+                            .flat_map(|piece| piece.block.iter())
+                            .copied()
+                            .collect();
+                        let piece_hash: [u8; 20] = Sha1::digest(&piece_data).into();
 
-                    if piece_hash == accepted_piece_req.piece_hash {
-                        tracing::info!(
-                            "Completed the piece_index: {}",
-                            accepted_piece_req.piece_index
-                        );
+                        if piece_hash == accepted_piece_req.piece_hash {
+                            tracing::info!(
+                                "Completed the piece_index: {}",
+                                accepted_piece_req.piece_index
+                            );
 
-                        shared_downloads.set_piece(accepted_piece_req, piece_data).await;
-                        piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
-                        break;
-                    } else {
-                        tracing::error!(
-                            "Wrong piece_hash received for the piece_index: {}",
-                            accepted_piece_req.piece_index
-                        );
-                        tracing::error!("Caught pieces trace:");
-                        tracing::error!("{:?}", piece_response);
+                            shared_downloads
+                                .set_piece(accepted_piece_req, piece_data)
+                                .await;
+                            piece_responses_guard.retain(|pr| !piece_response.contains(&pr));
+                            break;
+                        } else {
+                            tracing::error!(
+                                "Wrong piece_hash received for the piece_index: {}",
+                                accepted_piece_req.piece_index
+                            );
+                            tracing::error!("Caught pieces trace:");
+                            tracing::error!("{:?}", piece_response);
 
-                        return Err(Error::new(
-                            ErrorKind::InvalidData,
-                            "Wrong piece_hash received, break the connection",
-                        ));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Wrong piece_hash received, break the connection",
+                            ));
+                        }
                     }
                 }
-            }
-            return Ok(());
-        }).expect("Failed to create a Builder");
+                return Ok(());
+            })
+            .expect("Failed to create a Builder");
 
         return Ok(());
     }
