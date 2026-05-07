@@ -1417,6 +1417,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs_torrent_client"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "console-subscriber",
+ "futures-util",
+ "rand",
+ "reqwest",
+ "sha1",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "winnow",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1902,24 +1920,6 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
-]
-
-[[package]]
-name = "torrent_reader"
-version = "0.1.0"
-dependencies = [
- "clap",
- "console-subscriber",
- "futures-util",
- "rand",
- "reqwest",
- "sha1",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "winnow",
 ]
 
 [[package]]

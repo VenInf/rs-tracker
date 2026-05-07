@@ -1,7 +1,6 @@
 use crate::handshake;
-use crate::pieces::{
-    Bitfield, PieceDownloaded, PieceRequest, PieceResponse, SharedDownloads, Task,
-};
+use crate::pieces::{Bitfield, PieceRequest, PieceResponse, SharedDownloads, Task};
+use crate::torrent_tcp_message::TorrentTcpMessage;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use sha1::{Digest, Sha1};
@@ -15,8 +14,21 @@ use tokio::time::{Duration, timeout};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+#[derive(Debug, Clone, Copy)]
+pub struct PeerId([u8; 20]);
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let peer_id_str: String = String::from_utf8_lossy(&self.0)
+                                                        .chars()
+                                                        .filter(|&c| c != '\n' && c != '\r')
+                                                        .collect();
+        write!(f, "[{}]", peer_id_str)
+    }
+}
+
+
 pub struct ConnectedPeer {
-    pub peer_id: [u8; 20],
+    pub peer_id: PeerId,
     pub peer_bitfield_arc: Arc<Mutex<Bitfield>>,
     sent_have_bitfield_arc: Arc<Mutex<Bitfield>>,
     framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
@@ -29,6 +41,7 @@ pub struct ConnectedPeer {
     request_permits_sender: mpsc::Sender<()>,
     request_permits_receiver: mpsc::Receiver<()>,
 }
+
 
 impl ConnectedPeer {
     pub async fn new(
@@ -72,7 +85,7 @@ impl ConnectedPeer {
         }
 
         Ok(Self {
-            peer_id: response_handshake.peer_id,
+            peer_id: PeerId(response_handshake.peer_id),
             peer_bitfield_arc: Arc::new(Mutex::new(Bitfield::new(total_amount_of_pieces))),
             sent_have_bitfield_arc: Arc::new(Mutex::new(Bitfield::new(total_amount_of_pieces))),
             caught_piece_responses_arc: Arc::new(Mutex::new(vec![])),
@@ -217,8 +230,8 @@ impl ConnectedPeer {
         // Listener, also responses to peer requests
         tokio::task::Builder::new()
             .name(&format!(
-                "Listener for: {:?}",
-                String::from_utf8_lossy(&self.peer_id)
+                "Listener for: {}",
+                &self.peer_id
             ))
             .spawn(async move {
                 loop {
@@ -235,14 +248,14 @@ impl ConnectedPeer {
                         TorrentTcpMessage::Bitfield(raw_bitfield) => {
                             tracing::info!(
                                 "Caught Bitfield from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             let mut peer_bitfield_guard = peer_bitfield.lock().await;
                             peer_bitfield_guard.set_all(&raw_bitfield);
 
                             tracing::info!(
                                 "Peer {} has {} pieces our of {} pieces",
-                                String::from_utf8_lossy(&self.peer_id),
+                                &self.peer_id,
                                 peer_bitfield_guard.total_set(),
                                 peer_bitfield_guard.total()
                             );
@@ -256,21 +269,21 @@ impl ConnectedPeer {
                         TorrentTcpMessage::Choke => {
                             tracing::info!(
                                 "Caught Choke from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             let _ = self.choked_sender.send(true);
                         }
                         TorrentTcpMessage::Unchoke => {
                             tracing::info!(
                                 "Caught Unchoke from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             let _ = self.choked_sender.send(false);
                         }
                         TorrentTcpMessage::Have(piece_index) => {
                             tracing::info!(
                                 "Caught Have from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             peer_bitfield.lock().await.set(piece_index);
                             let bitfield = shared_downloads.bitfield.read().await;
@@ -278,7 +291,6 @@ impl ConnectedPeer {
                                 let _ = tasks_sender.send(Task::Interested).await;
                             }
                         }
-
                         TorrentTcpMessage::Piece {
                             index,
                             begin,
@@ -286,7 +298,7 @@ impl ConnectedPeer {
                         } => {
                             tracing::info!(
                                 "Caught Piece from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             let mut pieces = caught_piece_responses.lock().await;
                             let pr = PieceResponse {
@@ -300,7 +312,7 @@ impl ConnectedPeer {
                             } else {
                                 tracing::error!(
                                     "Caught duplicate Piece from {}",
-                                    String::from_utf8_lossy(&self.peer_id)
+                                    &self.peer_id
                                 );
                             }
                         }
@@ -311,7 +323,7 @@ impl ConnectedPeer {
                         } => {
                             tracing::info!(
                                 "Caught Request from {}",
-                                String::from_utf8_lossy(&self.peer_id)
+                                &self.peer_id
                             );
                             if let Some(block) =
                                 shared_downloads.get_block(index, begin, length).await
@@ -341,8 +353,8 @@ impl ConnectedPeer {
         // Sender, for local requests only
         tokio::task::Builder::new()
             .name(&format!(
-                "Sender for: {:?}",
-                String::from_utf8_lossy(&self.peer_id)
+                "Sender for: {}",
+                &self.peer_id
             ))
             .spawn(async move {
                 loop {
@@ -351,7 +363,7 @@ impl ConnectedPeer {
                             Task::Interested => {
                                 tracing::info!(
                                     "Sending Interested {}",
-                                    String::from_utf8_lossy(&self.peer_id)
+                                    &self.peer_id
                                 );
                                 let _ =
                                     Self::send_message(&mut sink, TorrentTcpMessage::Interested)
@@ -372,7 +384,7 @@ impl ConnectedPeer {
                             }) => {
                                 tracing::info!(
                                     "Sending Piece {}, index: {} ",
-                                    String::from_utf8_lossy(&self.peer_id),
+                                    &self.peer_id,
                                     index
                                 );
                                 let resonse_message = TorrentTcpMessage::Piece {
@@ -385,7 +397,7 @@ impl ConnectedPeer {
                             Task::Request(piece_req) => {
                                 tracing::info!(
                                     "Sending Request to {}, piece_index: {} ",
-                                    String::from_utf8_lossy(&self.peer_id),
+                                    &self.peer_id,
                                     piece_req.piece_index
                                 );
                                 let _ = Self::send_download_pieces(
@@ -411,8 +423,8 @@ impl ConnectedPeer {
         // Tasks sender for the `Have` messages
         tokio::task::Builder::new()
             .name(&format!(
-                "Haves sender for: {:?}",
-                String::from_utf8_lossy(&self.peer_id)
+                "Haves sender for: {}",
+                &self.peer_id
             ))
             .spawn(async move {
                 loop {
@@ -442,8 +454,8 @@ impl ConnectedPeer {
         // Bundler, creates DownloadedPiece's, break the connection if the peer misbehaves
         tokio::task::Builder::new()
             .name(&format!(
-                "Bundler for: {:?}",
-                String::from_utf8_lossy(&self.peer_id)
+                "Bundler for: {}",
+                &self.peer_id
             ))
             .spawn(async move {
                 while let Some(accepted_piece_req) = accepted_piece_req_receiver.recv().await {
@@ -534,165 +546,5 @@ impl ConnectedPeer {
             .expect("Failed to create a Builder");
 
         return Ok(());
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
-pub enum TorrentTcpMessage {
-    KeepAlive,
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have(u32),
-    Bitfield(Vec<u8>),
-    Request {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
-    Piece {
-        index: u32,
-        begin: u32,
-        block: Vec<u8>,
-    },
-    Cancel {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
-}
-
-impl fmt::Display for TorrentTcpMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TorrentTcpMessage::KeepAlive => write!(f, "KeepAlive"),
-            TorrentTcpMessage::Choke => write!(f, "Choke"),
-            TorrentTcpMessage::Unchoke => write!(f, "Unchoke"),
-            TorrentTcpMessage::Interested => write!(f, "Interested"),
-            TorrentTcpMessage::NotInterested => write!(f, "NotInterested"),
-            TorrentTcpMessage::Have(_) => write!(f, "Have"),
-            TorrentTcpMessage::Bitfield(_) => write!(f, "Bitfield"),
-            TorrentTcpMessage::Piece { .. } => write!(f, "Piece"),
-            TorrentTcpMessage::Request { .. } => write!(f, "Request"),
-            TorrentTcpMessage::Cancel { .. } => write!(f, "Cancel"),
-        }
-    }
-}
-
-impl TorrentTcpMessage {
-    pub fn parse(id: &u8, payload: &[u8]) -> Result<Self, Error> {
-        match id {
-            0 => Ok(TorrentTcpMessage::Choke),
-            1 => Ok(TorrentTcpMessage::Unchoke),
-            2 => Ok(TorrentTcpMessage::Interested),
-            3 => Ok(TorrentTcpMessage::NotInterested),
-            4 => {
-                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                Ok(TorrentTcpMessage::Have(index))
-            }
-            5 => Ok(TorrentTcpMessage::Bitfield(payload.to_vec())),
-            6 => {
-                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                let length = u32::from_be_bytes(payload[8..12].try_into().unwrap());
-                Ok(TorrentTcpMessage::Request {
-                    index,
-                    begin,
-                    length,
-                })
-            }
-            7 => {
-                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                let block = payload[8..].to_vec();
-                Ok(TorrentTcpMessage::Piece {
-                    index,
-                    begin,
-                    block,
-                })
-            }
-            8 => {
-                let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                let length = u32::from_be_bytes(payload[8..12].try_into().unwrap());
-                Ok(TorrentTcpMessage::Cancel {
-                    index,
-                    begin,
-                    length,
-                })
-            }
-            // Add other IDs as needed
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Unknown Message ID: {}", id),
-            )),
-        }
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        match self {
-            TorrentTcpMessage::KeepAlive => vec![0; 4],
-
-            TorrentTcpMessage::Choke => self.packet(0, &[]),
-            TorrentTcpMessage::Unchoke => self.packet(1, &[]),
-            TorrentTcpMessage::Interested => self.packet(2, &[]),
-            TorrentTcpMessage::NotInterested => self.packet(3, &[]),
-
-            TorrentTcpMessage::Have(index) => self.packet(4, &index.to_be_bytes()),
-
-            TorrentTcpMessage::Bitfield(bitfield) => self.packet(5, &bitfield.as_slice()),
-
-            TorrentTcpMessage::Request {
-                index,
-                begin,
-                length,
-            } => {
-                let payload = [
-                    index.to_be_bytes(),
-                    begin.to_be_bytes(),
-                    length.to_be_bytes(),
-                ];
-                self.packet(6, payload.concat().as_slice())
-            }
-
-            TorrentTcpMessage::Piece {
-                index,
-                begin,
-                block,
-            } => {
-                let header = [index.to_be_bytes(), begin.to_be_bytes()].concat();
-
-                let payload = header.iter().copied().chain(block.iter().copied());
-
-                let len = (9 + block.len()) as u32;
-                len.to_be_bytes()
-                    .into_iter()
-                    .chain(std::iter::once(7))
-                    .chain(payload)
-                    .collect()
-            }
-
-            TorrentTcpMessage::Cancel {
-                index,
-                begin,
-                length,
-            } => {
-                let payload = [
-                    index.to_be_bytes(),
-                    begin.to_be_bytes(),
-                    length.to_be_bytes(),
-                ];
-                self.packet(8, payload.concat().as_slice())
-            }
-        }
-    }
-
-    fn packet(&self, id: u8, payload: &[u8]) -> Vec<u8> {
-        // We don't add length to the packets since this is handeled by tokio_util::codec::LengthDelimitedCodec
-        let mut buf = Vec::with_capacity(1 + payload.len());
-        buf.push(id);
-        buf.extend_from_slice(payload);
-        buf
     }
 }

@@ -2,8 +2,6 @@ use crate::bencoding_parser as BP;
 use crate::torrent_file as TF;
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use url::form_urlencoded;
 
 pub async fn announce_to_tracker<'a>(
@@ -43,12 +41,6 @@ pub async fn announce_to_tracker<'a>(
         .map_err(|_e| Error::new(ErrorKind::InvalidData, "Failed to get bytes"))?;
 
     Ok(bytes.to_vec())
-}
-
-pub async fn save_file(path: &str, data: &[u8]) -> Result<(), Error> {
-    let mut file = File::create(path).await?;
-    file.write_all(data).await?;
-    Ok(())
 }
 
 #[derive(Debug)]

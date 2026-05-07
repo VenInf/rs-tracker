@@ -7,7 +7,7 @@ use std::{error::Error, fmt};
 pub struct TorrentFile {
     pub info: TorrentInfo,
     pub info_hash: [u8; 20],
-    pub left_initial: i64,
+    pub left_initial: u64,
     pub announce: Option<String>,
     pub announce_list: Option<Vec<String>>,
     pub url_list: Option<Vec<String>>,
@@ -23,27 +23,27 @@ pub struct TorrentFile {
 pub struct TorrentInfo {
     pub file_data: FileData,
     pub name: String,
-    pub piece_length: i64,
+    pub piece_length: u64,
     pub piece_hashes: Vec<[u8; 20]>,
 }
 
 #[derive(Debug, Clone)]
 pub enum FileData {
-    Single { length: i64 },
+    Single { length: u64 },
     Multi { files: Vec<File> },
 }
 
 #[derive(Debug, Clone)]
 pub struct File {
-    pub length: i64,
+    pub length: u64,
     pub path: Vec<String>,
 }
 
 impl FileData {
     pub fn total_length(self) -> u64 {
         match self {
-            FileData::Single { length } => length as u64,
-            FileData::Multi { files } => files.iter().map(|file| file.length as u64).sum(),
+            FileData::Single { length } => length,
+            FileData::Multi { files } => files.iter().map(|file| file.length).sum(),
         }
     }
 }
@@ -80,7 +80,7 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile, 
         .ok_or(ConversionError::new("name"))?;
     let piece_length = info_dict
         .get_int(b"piece length")
-        .ok_or(ConversionError::new("piece length"))?;
+        .ok_or(ConversionError::new("piece length"))? as u64;
     let Some(BP::AST::ByteString(pieces_raw)) = info_dict.get_from_dict(b"pieces") else {
         return Err(ConversionError::new("pieces"));
     };
@@ -91,14 +91,14 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile, 
         .collect();
 
     let file_data = if let Some(length) = info_dict.get_int(b"length") {
-        FileData::Single { length }
+        FileData::Single { length: length as u64 }
     } else {
         if let Some(BP::AST::List(files_list)) = info_dict.get_from_dict(b"files") {
             let opt_files: Option<Vec<File>> = files_list
                 .into_iter()
                 .map(|node| {
                     Some(File {
-                        length: node.get_int(b"length")?,
+                        length: node.get_int(b"length")? as u64,
                         path: node.get_from_dict(b"path")?.get_list_of_str()?,
                     })
                 })
@@ -111,7 +111,7 @@ pub fn bentree_to_torrent_file<'a>(ast: &'a BP::AST<'a>) -> Result<TorrentFile, 
         }
     };
 
-    let left_initial: i64 = match file_data {
+    let left_initial: u64 = match file_data {
         FileData::Single { length } => length,
         FileData::Multi { ref files } => files.iter().map(|file| file.length).sum(),
     };

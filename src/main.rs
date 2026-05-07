@@ -4,11 +4,14 @@ mod handshake;
 mod peer;
 mod pieces;
 mod torrent_file;
+mod torrent_tcp_message;
 
 use crate::pieces::{Bitfield, PieceDownloaded, PieceRequest, SharedDownloads, Task};
+use crate::torrent_file::TorrentFile;
+use crate::torrent_file::FileData;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -68,7 +71,7 @@ async fn main() -> Result<(), Error> {
     let piece_length = torrent_file.info.piece_length as u32;
     println!("piece_length: {}", piece_length);
 
-    let remainder = torrent_file.info.file_data.total_length() as u32 % piece_length;
+    let remainder = torrent_file.info.file_data.clone().total_length() as u32 % piece_length;
     let last_piece_length = if remainder == 0 {
         piece_length
     } else {
@@ -164,8 +167,8 @@ async fn main() -> Result<(), Error> {
     for peer in connected_peers {
         tokio::task::Builder::new()
             .name(&format!(
-                "Call interact_loop on peer with id: {:?}",
-                String::from_utf8_lossy(&peer.peer_id)
+                "Call interact_loop on peer with id: {}",
+                &peer.peer_id
             ))
             .spawn(async move {
                 let peer_result = peer.interact_loop().await;
@@ -242,9 +245,8 @@ async fn main() -> Result<(), Error> {
         tracing::info!("Total downloaded pieces: {}", bitfield.total_set());
 
         if bitfield.is_full() {
-            let file_name = torrent_file.info.name.clone();
             let downloaded_pieces = shared_downloads.pieces.read().await.clone();
-            write_to_disk(downloaded_pieces, file_name)?;
+            write_to_disk(downloaded_pieces, torrent_file.clone())?;
             return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -253,28 +255,44 @@ async fn main() -> Result<(), Error> {
 
 pub fn write_to_disk(
     pieces_downloaded: Vec<PieceDownloaded>,
-    filename: String,
+    torrent_file: TorrentFile,
 ) -> Result<(), Error> {
-    // TODO: do the write according to the TorrentFile
     println!("Attempt to write to disc");
-
-    let mut file = OpenOptions::new().write(true).create(true).open(filename)?;
-
-    let length: u64 = pieces_downloaded
+    
+    let total_downloaded_length: u64 = pieces_downloaded
         .iter()
         .map(|p| p.piece_req.piece_length as u64)
         .sum();
 
-    file.set_len(length)?;
+    let downloaded_data: Vec<u8> = {
+        let mut pieces = pieces_downloaded.clone();
+        pieces.sort_by(|p1, p2| p1.piece_req.piece_index.cmp(&p2.piece_req.piece_index));
+        pieces.into_iter().flat_map(|p| p.piece_data).collect()
+    };
 
-    let regular_piece_length = std::cmp::max(
-        pieces_downloaded[0].piece_req.piece_length,
-        pieces_downloaded[1].piece_req.piece_length,
-    );
-    for piece in pieces_downloaded.iter() {
-        let offset = (piece.piece_req.piece_index as u64) * (regular_piece_length as u64);
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(piece.piece_data.as_slice())?;
+    match torrent_file.info.file_data {
+        FileData::Single { length } => {
+            assert_eq!(total_downloaded_length, length);
+            let filename = torrent_file.info.name;
+            let mut file = OpenOptions::new().write(true).create(true).open(filename)?;
+            file.set_len(total_downloaded_length)?;
+            file.write_all(downloaded_data.as_slice())?;
+        },
+        FileData::Multi { files } => {
+            let mut file_offset_start: usize = 0;
+            for file_info in files {
+                let filename = file_info.path.concat();
+                let mut file = OpenOptions::new().write(true).create(true).open(filename)?;
+                file.set_len(file_info.length)?;
+
+                let file_offset_end = file_offset_start + file_info.length as usize;
+                let data_slice = &downloaded_data[file_offset_start..file_offset_end];
+                file.write_all(data_slice)?;
+
+                file_offset_start = file_offset_end;            
+            }
+        }
     }
     Ok(())
+
 }

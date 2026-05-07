@@ -12,6 +12,7 @@ A small rust torrent client.
 
 
 Current TODO:
+- [ ] True multithreading
 - [ ] Send the Cancel requests
 - [ ] Serve for external peers
 - [ ] add multifile torrent support

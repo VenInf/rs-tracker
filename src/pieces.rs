@@ -1,9 +1,3 @@
-use sha1::{Digest, Sha1};
-use std::io::{Seek, SeekFrom, Write};
-use std::{
-    fmt,
-    io::{Error, ErrorKind},
-};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -179,7 +173,7 @@ impl Bitfield {
 }
 
 impl std::fmt::Display for Bitfield {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Take up to 4 bytes (32 pieces)
         let display_limit = 4.min(self.bytes.len());
         let mut bits = String::new();
