@@ -60,9 +60,10 @@ async fn main() -> Result<(), Error> {
 
     let announce_bytes: &mut &[u8] = &mut announce_response.as_slice();
     let announce_ast = bencoding_parser::parse_bencode(announce_bytes).unwrap();
+    println!("announce_ast: {}", announce_ast);
 
     let announce_response = announce::parse_announce_response(announce_ast)
-        .map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse announce response"))?;
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
     println!("{:?}", announce_response);
 
     let total_amount_of_pieces = torrent_file.info.piece_hashes.len() as u32;

@@ -56,19 +56,34 @@ pub fn parse_announce_response<'a>(
         .get_int(b"interval")
         .ok_or(TF::ConversionError::new("interval"))?;
 
-    let Some(BP::AST::ByteString(peers_raw)) = ast.get_from_dict(b"peers") else {
+    let Some(peers_field) = ast.get_from_dict(b"peers") else {
         return Err(TF::ConversionError::new("peers"));
     };
-    let peers = peers_raw
-        .chunks_exact(6)
-        .map(|chunk| {
-            let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
 
-            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+    if let BP::AST::ByteString(peers_raw) = peers_field {
+        let peers = peers_raw
+            .chunks_exact(6)
+            .map(|chunk| {
+                let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                let port = u16::from_be_bytes([chunk[4], chunk[5]]);
 
-            (ip.to_string(), port)
-        })
-        .collect();
+                (ip.to_string(), port)
+            })
+            .collect();
+        return Ok(AnnounceResponse { interval, peers });
+    }
 
-    Ok(AnnounceResponse { interval, peers })
+    if let BP::AST::List(peers_list) = peers_field {
+        let opt_peers_raw: Option<Vec<(String, i64)>> = peers_list.iter()
+                             .map(|dict| dict.get_str(b"ip").zip(dict.get_int(b"port")))
+                             .collect();
+        if let Some(peers_raw) = opt_peers_raw {
+            let peers = peers_raw.into_iter().map(|(a, p)| (a, p as u16)).collect();
+            return Ok(AnnounceResponse { interval, peers });
+        } else {
+            return Err(TF::ConversionError::new("peers"));
+        }
+    }
+
+    Err(TF::ConversionError::new("peers"))
 }

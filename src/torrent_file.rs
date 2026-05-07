@@ -65,7 +65,7 @@ impl Error for ConversionError {}
 
 impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Failed to find [{}] field(s)", self.failed_to_find)
+        write!(f, "Malformed of abscent [{}] field(s)", self.failed_to_find)
     }
 }
 

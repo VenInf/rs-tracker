@@ -1,9 +1,9 @@
-use torrent_reader::bencoding_parser as BP;
-use torrent_reader::torrent_file as TF;
+use rs_torrent_client::bencoding_parser as BP;
+use rs_torrent_client::torrent_file as TF;
 
 #[test]
 fn test_debian_parsing() {
-    let bytes = include_bytes!("../samples/debian.torrent");
+    let bytes = include_bytes!("../samples/debian-13.4.0-amd64-netinst.iso.torrent");
     let bytes: &mut &[u8] = &mut &bytes[..];
 
     let ast = BP::parse_bencode(bytes).expect("Bencode decoding failed");
@@ -30,7 +30,7 @@ fn test_debian_parsing() {
     let TF::FileData::Single { length } = torrent.info.file_data else {
         panic!("Expected a single file torrent")
     };
-    let length_by_pieces: i64 = torrent.info.piece_length * torrent.info.piece_hashes.len() as i64;
+    let length_by_pieces: u64 = torrent.info.piece_length * torrent.info.piece_hashes.len() as u64;
     assert!(length <= length_by_pieces);
     assert!(length_by_pieces - torrent.info.piece_length <= length);
 }
@@ -73,8 +73,8 @@ fn test_wet_fly_fishing_parsing() {
     let TF::FileData::Multi { files } = torrent.info.file_data else {
         panic!("Expected a multi file torrent")
     };
-    let length: i64 = files.iter().map(|f| f.length).sum();
-    let length_by_pieces: i64 = torrent.info.piece_length * torrent.info.piece_hashes.len() as i64;
+    let length: u64 = files.iter().map(|f| f.length).sum();
+    let length_by_pieces: u64 = torrent.info.piece_length * torrent.info.piece_hashes.len() as u64;
     assert!(length <= length_by_pieces);
     assert!(length_by_pieces - torrent.info.piece_length <= length);
 }
